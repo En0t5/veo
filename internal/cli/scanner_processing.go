@@ -79,6 +79,50 @@ func (sc *ScanController) applyFilterForTarget(responses []interfaces.HTTPRespon
 	return filterResult, nil
 }
 
+// processTargetResponses 处理目标响应：类型转换、应用过滤器、收集统计
+func (sc *ScanController) processTargetResponses(responses []*interfaces.HTTPResponse, target string, filter *dirscan.ResponseFilter) ([]interfaces.HTTPResponse, error) {
+	// 转换为接口类型
+	var targetResponses []interfaces.HTTPResponse
+	for _, resp := range responses {
+		httpResp := interfaces.HTTPResponse{
+			URL:             resp.URL,
+			StatusCode:      resp.StatusCode,
+			ContentLength:   resp.ContentLength,
+			ContentType:     resp.ContentType,
+			Body:            resp.ResponseBody,
+			ResponseHeaders: resp.ResponseHeaders,
+			RequestHeaders:  resp.RequestHeaders,
+			ResponseBody:    resp.ResponseBody,
+			Title:           resp.Title,
+			Server:          resp.Server,
+			Duration:        resp.Duration,
+			IsDirectory:     strings.HasSuffix(resp.URL, "/"),
+		}
+		targetResponses = append(targetResponses, httpResp)
+	}
+
+	if len(targetResponses) == 0 {
+		return nil, nil
+	}
+
+	// 应用过滤器
+	filterResult, err := sc.applyFilterForTarget(targetResponses, target, filter)
+	if err != nil {
+		logger.Errorf("目标 %s 过滤器应用失败: %v", target, err)
+		// 如果过滤失败，返回原始结果（Fail Open）
+		return targetResponses, err
+	}
+
+	// 收集被过滤的页面用于报告
+	sc.collectedResultsMu.Lock()
+	sc.collectedPrimaryFiltered = append(sc.collectedPrimaryFiltered, filterResult.PrimaryFilteredPages...)
+	sc.collectedStatusFiltered = append(sc.collectedStatusFiltered, filterResult.StatusFilteredPages...)
+	sc.collectedResultsMu.Unlock()
+
+	// 返回有效结果
+	return filterResult.ValidPages, nil
+}
+
 func (sc *ScanController) buildScanParams() map[string]interface{} {
 	params := map[string]interface{}{
 		"threads":                   sc.maxConcurrent,

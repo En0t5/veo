@@ -7,10 +7,97 @@ import (
 	"veo/pkg/utils/shared"
 )
 
-// ExtractNextLevelTargets 从扫描结果中提取下一层级的扫描目标
-// results: 上一轮扫描的有效结果
-// alreadyScanned: 已经扫描过的URL集合（用于去重）
-// 返回: 新的待扫描URL列表
+// LayerScanner 单层扫描器接口
+// 负责执行单个层级的扫描任务（不论是并发还是顺序）
+// depth: 当前递归深度（0表示初始层）
+type LayerScanner func(targets []string, filter *ResponseFilter, depth int) ([]interfaces.HTTPResponse, error)
+
+// RunRecursiveScan 执行通用递归扫描
+// 统一封装了递归深度控制、状态去重、下一层提取和验证逻辑
+func RunRecursiveScan(
+	initialTargets []string,
+	maxDepth int,
+	layerScanner LayerScanner,
+	dataFetcher DataFetcher,
+	sharedFilter *ResponseFilter,
+) ([]interfaces.HTTPResponse, error) {
+	var allResults []interfaces.HTTPResponse
+	
+	// 初始化递归变量
+	currentTargets := initialTargets
+	alreadyScanned := make(map[string]bool)
+
+	// 预先标记初始目标
+	for _, t := range initialTargets {
+		alreadyScanned[t] = true
+		// 同时也标记带斜杠的版本（如果不带斜杠），防止重复扫描
+		if !strings.HasSuffix(t, "/") {
+			alreadyScanned[t+"/"] = true
+		}
+	}
+
+	for d := 0; d <= maxDepth; d++ {
+		if len(currentTargets) == 0 {
+			break
+		}
+
+		if d > 0 {
+			logger.Infof("正在进行第 %d 层递归目录扫描，目标数量: %d", d, len(currentTargets))
+			// 仅在DEBUG模式下打印所有目标，避免日志刷屏
+			if len(currentTargets) <= 5 {
+				for _, target := range currentTargets {
+					logger.Debugf("  └─ 递归目标: %s", target)
+				}
+			}
+		}
+
+		// 决定当前层使用的过滤器
+		// 第0层通常使用站点默认过滤器（如果sharedFilter为nil），或者统一使用sharedFilter
+		// 这里简化逻辑：如果有sharedFilter，全程使用；否则由LayerScanner自行决定（通常是不对的）
+		// 为了强一致性，建议必须传递sharedFilter用于递归层（d>0）
+		// 如果 maxDepth=0，sharedFilter 可能为 nil
+		var currentFilter *ResponseFilter
+		if d > 0 {
+			currentFilter = sharedFilter
+		} else if sharedFilter != nil {
+			// 如果提供了共享过滤器，第0层也使用它（例如 Addon 模式）
+			currentFilter = sharedFilter
+		}
+
+		// 执行单层扫描
+		results, err := layerScanner(currentTargets, currentFilter, d)
+		if err != nil {
+			logger.Errorf("目录扫描出错 (Depth %d): %v", d, err)
+			// 继续处理部分结果，不中断整个流程
+		}
+
+		if len(results) > 0 {
+			allResults = append(allResults, results...)
+		}
+
+		// 如果还没达到最大深度，提取下一层目标
+		if d < maxDepth {
+			newTargets := ExtractNextLevelTargets(results, alreadyScanned)
+
+			// 验证潜在的目录目标
+			// [关键优化] 对不确定的目录进行主动验证，确保递归的有效性
+			validNewTargets := VerifyDirectoryTargets(newTargets, results, dataFetcher)
+
+			// 再次去重并加入已扫描集合
+			var finalTargets []string
+			for _, nt := range validNewTargets {
+				if !alreadyScanned[nt] {
+					alreadyScanned[nt] = true
+					finalTargets = append(finalTargets, nt)
+				}
+			}
+			currentTargets = finalTargets
+		}
+	}
+
+	return allResults, nil
+}
+// ExtractNextLevelTargets 提取下一层需要递归扫描的目标
 func ExtractNextLevelTargets(results []interfaces.HTTPResponse, alreadyScanned map[string]bool) []string {
 	var newTargets []string
 	// 本轮去重，防止同一次结果中有重复

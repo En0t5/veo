@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"veo/pkg/dirscan"
+	"veo/pkg/utils/httpclient"
 	"veo/pkg/utils/logger"
 	"veo/pkg/utils/shared"
 	"veo/proxy"
@@ -19,12 +20,12 @@ type FingerprintAddon struct {
 	proxy.BaseAddon
 	engine           *Engine
 	enabled          bool
-	httpClient       interface{}       // HTTP客户端（用于主动探测）
-	probedHosts      map[string]bool   // 已探测的主机缓存
-	probedMutex      sync.RWMutex      // 缓存锁
-	encodingDetector *EncodingDetector // 编码检测器
-	allowedHosts     []string          // 允许的主机列表
-	customHeaders    map[string]string // 自定义HTTP头部
+	httpClient       httpclient.HTTPClientInterface // HTTP客户端（用于主动探测）
+	probedHosts      map[string]bool                // 已探测的主机缓存
+	probedMutex      sync.RWMutex                   // 缓存锁
+	encodingDetector *EncodingDetector              // 编码检测器
+	allowedHosts     []string                       // 允许的主机列表
+	customHeaders    map[string]string              // 自定义HTTP头部
 }
 
 // NewFingerprintAddon 创建指纹识别插件
@@ -236,7 +237,7 @@ func (fa *FingerprintAddon) shouldSkipResponse(f *proxy.Flow) bool {
 // 公共方法
 
 // SetHTTPClient 设置HTTP客户端（用于主动探测）
-func (fa *FingerprintAddon) SetHTTPClient(client interface{}) {
+func (fa *FingerprintAddon) SetHTTPClient(client httpclient.HTTPClientInterface) {
 	fa.httpClient = client
 	logger.Debug("HTTP客户端已设置，支持主动探测")
 }

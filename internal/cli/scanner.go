@@ -142,9 +142,23 @@ func NewScanController(args *CLIArgs, cfg *config.Config) *ScanController {
 	ruleEnabled := args.Verbose || args.VeryVerbose
 
 	if fpEngine != nil {
-		fpEngine.EnableSnippet(true) // 始终启用片段捕获，以便报告中使用
-		fpEngine.EnableConsoleSnippet(snippetEnabled)
-		fpEngine.EnableRuleLogging(ruleEnabled)
+		// 启用snippet捕获(用于报告)
+		fpEngine.EnableSnippet(true)
+		
+		// 创建OutputFormatter并注入到Engine
+		var outputFormatter fingerprint.OutputFormatter
+		if args.JSONOutput {
+			outputFormatter = fingerprint.NewJSONOutputFormatter()
+		} else {
+			outputFormatter = fingerprint.NewConsoleOutputFormatter(
+				true,            // logMatches
+				true,            // showSnippet - 始终捕获
+				ruleEnabled,     // showRules
+				snippetEnabled,  // consoleSnippetEnabled
+			)
+		}
+		fpEngine.SetOutputFormatter(outputFormatter)
+		logger.Debugf("指纹引擎 OutputFormatter 已注入: %T", outputFormatter)
 	}
 
 	sc := &ScanController{

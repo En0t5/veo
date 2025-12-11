@@ -238,7 +238,7 @@ func (p *DSLParser) evaluateIcon(dsl string, ctx *DSLContext) (bool, bool) {
 			iconURL := ctx.BaseURL + iconPath
 
 			// 先检查匹配结果缓存，避免重复比较
-			if cachedMatch, exists := ctx.Engine.getIconMatchCache(iconURL, expectedHash); exists {
+			if cachedMatch, exists := ctx.Engine.iconCache.GetMatchResult(iconURL, expectedHash); exists {
 				logger.Debugf("icon()匹配缓存命中: %s (%s) -> %v", iconURL, expectedHash, cachedMatch)
 				return cachedMatch, true
 			}
@@ -252,7 +252,7 @@ func (p *DSLParser) evaluateIcon(dsl string, ctx *DSLContext) (bool, bool) {
 
 			// 比较哈希值
 			match := actualHash == expectedHash
-			ctx.Engine.setIconMatchCache(iconURL, expectedHash, match)
+			ctx.Engine.iconCache.SetMatchResult(iconURL, expectedHash, match)
 			logger.Debugf("icon()匹配: %s -> %v", iconURL, match)
 			return match, true
 		}

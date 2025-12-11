@@ -45,105 +45,41 @@ func (sc *ScanController) runDirscanModule(targets []string) ([]interfaces.HTTPR
 	logger.Infof("Start Dirscan, Loaded Dict: %s", dictInfo)
 	logger.Debugf("开始目录扫描，目标数量: %d", len(targets))
 
-	var allResults []interfaces.HTTPResponse
-
-	// 初始化递归变量
-	currentTargets := targets
-	alreadyScanned := make(map[string]bool)
-
-	// 预先标记初始目标
-	for _, t := range targets {
-		alreadyScanned[t] = true
-		// 同时也标记带斜杠的版本（如果不带斜杠），防止重复扫描
-		if !strings.HasSuffix(t, "/") {
-			alreadyScanned[t+"/"] = true
+	// 定义层级扫描器
+	layerScanner := func(layerTargets []string, filter *dirscan.ResponseFilter, depth int) ([]interfaces.HTTPResponse, error) {
+		recursive := depth > 0
+		// 多目标优化：判断是否使用并发扫描
+		if len(layerTargets) > 1 {
+			return sc.runConcurrentDirscan(layerTargets, filter, recursive)
+		} else {
+			return sc.runSequentialDirscan(layerTargets, filter, recursive)
 		}
 	}
 
-	// 递归循环: 0 (Base) -> Depth
+	// 定义数据获取器（用于目录验证）
+	fetcher := func(urls []string) []interfaces.HTTPResponse {
+		responses := sc.requestProcessor.ProcessURLs(urls)
+		var result []interfaces.HTTPResponse
+		for _, r := range responses {
+			if r != nil {
+				result = append(result, *r)
+			}
+		}
+		return result
+	}
+
+	// 执行递归扫描
+	var allResults []interfaces.HTTPResponse
+	var recursiveFilter *dirscan.ResponseFilter = nil
 	maxDepth := sc.args.Depth
 
-	// 创建递归专用过滤器（共享于所有递归层级）
-	var recursiveFilter *dirscan.ResponseFilter
-	if maxDepth > 0 {
-		recursiveFilter = dirscan.CreateResponseFilterFromExternal()
-		recursiveFilter.EnableFingerprintSnippet(sc.showFingerprintSnippet)
-		recursiveFilter.EnableFingerprintRuleDisplay(sc.showFingerprintRule)
-		if sc.fingerprintEngine != nil {
-			recursiveFilter.SetFingerprintEngine(sc.fingerprintEngine)
-		}
-		logger.Debug("已初始化递归专用共享过滤器")
-	}
-
-	// 如果 args.Depth == 0，表示关闭递归（只扫第0层）
-
-	for d := 0; d <= maxDepth; d++ {
-		if len(currentTargets) == 0 {
-			break
-		}
-
-		if d > 0 {
-			// 打印递归扫描提示及具体目标
-			logger.Infof("正在进行第 %d 层递归目录扫描，目标数量: %d", d, len(currentTargets))
-			for _, target := range currentTargets {
-				logger.Infof("  └─ 递归目标: %s", target)
-			}
-		}
-
-		var results []interfaces.HTTPResponse
-		var err error
-
-		// 决定当前层使用的过滤器
-		var currentFilter *dirscan.ResponseFilter
-		if d > 0 {
-			currentFilter = recursiveFilter
-		}
-
-		// 多目标优化：判断是否使用并发扫描
-		if len(currentTargets) > 1 {
-			results, err = sc.runConcurrentDirscan(currentTargets, currentFilter, d > 0)
-		} else {
-			results, err = sc.runSequentialDirscan(currentTargets, currentFilter, d > 0)
-		}
-
-		if err != nil {
-			logger.Errorf("目录扫描出错 (Depth %d): %v", d, err)
-		}
-
-		if len(results) > 0 {
-			allResults = append(allResults, results...)
-		}
-
-		// 如果还没达到最大深度，提取下一层目标
-		if d < maxDepth {
-			newTargets := dirscan.ExtractNextLevelTargets(results, alreadyScanned)
-
-			// 更新已扫描集合
-			// [增强] 在加入递归队列前，对不确定的目录（即原URL不带/的）进行主动验证
-			fetcher := func(urls []string) []interfaces.HTTPResponse {
-				responses := sc.requestProcessor.ProcessURLs(urls)
-				var result []interfaces.HTTPResponse
-				for _, r := range responses {
-					if r != nil {
-						result = append(result, *r)
-					}
-				}
-				return result
-			}
-			
-			validNewTargets := dirscan.VerifyDirectoryTargets(newTargets, results, fetcher)
-			
-			// 再次去重并加入已扫描集合
-			var finalTargets []string
-			for _, nt := range validNewTargets {
-				if !alreadyScanned[nt] {
-					alreadyScanned[nt] = true
-					finalTargets = append(finalTargets, nt)
-				}
-			}
-			currentTargets = finalTargets
-		}
-	}
+	allResults, _ = dirscan.RunRecursiveScan(
+		targets,
+		maxDepth,
+		layerScanner,
+		fetcher,
+		recursiveFilter,
+	)
 
 	return allResults, nil
 }
@@ -169,43 +105,10 @@ func (sc *ScanController) runConcurrentDirscan(targets []string, filter *dirscan
 	for target, responses := range targetResults {
 		logger.Debugf("处理目标 %s 的 %d 个响应", target, len(responses))
 
-		// 转换为接口类型
-		var targetResponses []interfaces.HTTPResponse
-		for _, resp := range responses {
-			httpResp := interfaces.HTTPResponse{
-				URL:             resp.URL,
-				StatusCode:      resp.StatusCode,
-				ContentLength:   resp.ContentLength,
-				ContentType:     resp.ContentType,
-				Body:            resp.ResponseBody,
-				ResponseHeaders: resp.ResponseHeaders,
-				RequestHeaders:  resp.RequestHeaders,
-				ResponseBody:    resp.ResponseBody,
-				Title:           resp.Title,
-				Server:          resp.Server,
-				Duration:        resp.Duration,
-				IsDirectory:     strings.HasSuffix(resp.URL, "/"),
-			}
-			targetResponses = append(targetResponses, httpResp)
-		}
-
-		// [新增] 对单个目标立即应用过滤器（传递filter参数）
-		if len(targetResponses) > 0 {
-			filterResult, err := sc.applyFilterForTarget(targetResponses, target, filter)
-			if err != nil {
-				logger.Errorf("目标 %s 过滤器应用失败: %v", target, err)
-				// 如果过滤失败，使用原始结果
-				allResults = append(allResults, targetResponses...)
-			} else {
-				// 使用过滤后的结果
-				allResults = append(allResults, filterResult.ValidPages...)
-
-				// 收集被过滤的页面用于报告
-				sc.collectedResultsMu.Lock()
-				sc.collectedPrimaryFiltered = append(sc.collectedPrimaryFiltered, filterResult.PrimaryFilteredPages...)
-				sc.collectedStatusFiltered = append(sc.collectedStatusFiltered, filterResult.StatusFilteredPages...)
-				sc.collectedResultsMu.Unlock()
-			}
+		// 使用 processTargetResponses 统一处理
+		validPages, _ := sc.processTargetResponses(responses, target, filter)
+		if len(validPages) > 0 {
+			allResults = append(allResults, validPages...)
 		}
 	}
 
@@ -235,43 +138,10 @@ func (sc *ScanController) runSequentialDirscan(targets []string, filter *dirscan
 		// 发起HTTP请求
 		responses := sc.requestProcessor.ProcessURLs(scanURLs)
 
-		// 转换为接口类型
-		var targetResponses []interfaces.HTTPResponse
-		for _, resp := range responses {
-			httpResp := interfaces.HTTPResponse{
-				URL:             resp.URL,
-				StatusCode:      resp.StatusCode,
-				ContentLength:   resp.ContentLength,
-				ContentType:     resp.ContentType,
-				Body:            resp.ResponseBody,
-				ResponseHeaders: resp.ResponseHeaders,
-				RequestHeaders:  resp.RequestHeaders,
-				ResponseBody:    resp.ResponseBody,
-				Title:           resp.Title,
-				Server:          resp.Server,
-				Duration:        resp.Duration,
-				IsDirectory:     strings.HasSuffix(resp.URL, "/"),
-			}
-			targetResponses = append(targetResponses, httpResp)
-		}
-
-		// [新增] 对单个目标立即应用过滤器（传递filter参数）
-		if len(targetResponses) > 0 {
-			filterResult, err := sc.applyFilterForTarget(targetResponses, target, filter)
-			if err != nil {
-				logger.Errorf("目标 %s 过滤器应用失败: %v", target, err)
-				// 如果过滤失败，使用原始结果
-				allResults = append(allResults, targetResponses...)
-			} else {
-				// 使用过滤后的结果
-				allResults = append(allResults, filterResult.ValidPages...)
-
-				// 收集被过滤的页面用于报告
-				sc.collectedResultsMu.Lock()
-				sc.collectedPrimaryFiltered = append(sc.collectedPrimaryFiltered, filterResult.PrimaryFilteredPages...)
-				sc.collectedStatusFiltered = append(sc.collectedStatusFiltered, filterResult.StatusFilteredPages...)
-				sc.collectedResultsMu.Unlock()
-			}
+		// 使用 processTargetResponses 统一处理
+		validPages, _ := sc.processTargetResponses(responses, target, filter)
+		if len(validPages) > 0 {
+			allResults = append(allResults, validPages...)
 		}
 
 		// 更新已完成主机数统计（单目标扫描）

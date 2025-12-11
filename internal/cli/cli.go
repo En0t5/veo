@@ -944,9 +944,28 @@ func startApplication(args *CLIArgs) error {
 		fpaddon.SetGlobalAddon(app.fingerprintAddon)
 		app.fingerprintAddon.Enable()
 
-		// 控制匹配输出粒度
-		app.fingerprintAddon.EnableSnippet(args.VeryVerbose)
-		app.fingerprintAddon.EnableRuleLogging(args.Verbose || args.VeryVerbose)
+		// 为被动代理模式创建并注入OutputFormatter
+		engine := app.fingerprintAddon.GetEngine()
+		if engine != nil {
+			engine.EnableSnippet(true) // 启用snippet捕获
+			
+			snippetEnabled := args.VeryVerbose
+			ruleEnabled := args.Verbose || args.VeryVerbose
+			
+			outputFormatter := fpaddon.OutputFormatter(nil)
+			if args.JSONOutput {
+				outputFormatter = fpaddon.NewJSONOutputFormatter()
+			} else {
+				outputFormatter = fpaddon.NewConsoleOutputFormatter(
+					true,            // logMatches - 被动模式默认输出
+					true,            // showSnippet
+					ruleEnabled,     // showRules
+					snippetEnabled,  // consoleSnippetEnabled
+				)
+			}
+			engine.SetOutputFormatter(outputFormatter)
+			logger.Debugf("被动代理模式 OutputFormatter 已注入: %T", outputFormatter)
+		}
 
 		// 将指纹识别addon添加到代理服务器
 		app.proxy.AddAddon(app.fingerprintAddon)

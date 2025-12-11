@@ -2,7 +2,6 @@ package dirscan
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"veo/pkg/utils/interfaces"
@@ -130,72 +129,88 @@ func (da *DirscanAddon) TriggerScan() (*ScanResult, error) {
 	finalResult := &ScanResult{
 		StartTime:     time.Now(),
 		CollectedURLs: collectedURLs,
+		Responses:     make([]*interfaces.HTTPResponse, 0),
 		FilterResult: &interfaces.FilterResult{
 			ValidPages: make([]interfaces.HTTPResponse, 0),
 		},
 	}
 
-	currentTargets := collectedURLs
-	alreadyScanned := make(map[string]bool)
-
-	// 预先标记初始目标
-	for _, t := range currentTargets {
-		alreadyScanned[t] = true
-		if !strings.HasSuffix(t, "/") {
-			alreadyScanned[t+"/"] = true
-		}
-	}
-
-	// 递归循环
-	for d := 0; d <= depth; d++ {
-		if len(currentTargets) == 0 {
-			break
-		}
-
-		if d > 0 {
-			logger.Infof("正在进行第 %d 层递归目录扫描，目标数量: %d", d, len(currentTargets))
-		}
-
+	// 定义层级扫描器 (用于递归模式)
+	layerScanner := func(layerTargets []string, filter *ResponseFilter, currentDepth int) ([]interfaces.HTTPResponse, error) {
 		// 创建临时收集器
 		tempCollector := &RecursionCollector{
 			urls: make(map[string]int),
 		}
-		for _, t := range currentTargets {
+		for _, t := range layerTargets {
 			tempCollector.urls[t] = 1
 		}
 
 		// 执行扫描
-		scanResult, err := da.engine.PerformScanWithOptions(tempCollector, d > 0)
+		// 注意：recursion.go 中的 LayerScanner 签名接收 depth 参数
+		// 这里我们传递 recursive=true 给 engine，因为我们在递归模式中
+		scanResult, err := da.engine.PerformScanWithFilter(tempCollector, true, filter)
 		if err != nil {
-			logger.Errorf("Scan failed at depth %d: %v", d, err)
-			// 继续处理部分结果
+			return nil, err
+		}
+		if scanResult == nil {
+			return nil, nil
 		}
 
-		if scanResult != nil {
-			// 聚合响应
+		// 聚合结果到 finalResult
+		if len(scanResult.Responses) > 0 {
 			finalResult.Responses = append(finalResult.Responses, scanResult.Responses...)
-			finalResult.ScanURLs = append(finalResult.ScanURLs, scanResult.ScanURLs...)
-
-			// 聚合有效页面 (用于提取下一层目标和最终报告)
-			if scanResult.FilterResult != nil {
-				finalResult.FilterResult.ValidPages = append(finalResult.FilterResult.ValidPages, scanResult.FilterResult.ValidPages...)
-			}
-
-			// 更新元数据
-			finalResult.Target = scanResult.Target // 使用最后一个作为Target，或者保留初始的
+		}
+		if scanResult.FilterResult != nil && len(scanResult.FilterResult.ValidPages) > 0 {
+			finalResult.FilterResult.ValidPages = append(finalResult.FilterResult.ValidPages, scanResult.FilterResult.ValidPages...)
 		}
 
-		// 提取下一层目标
-		if d < depth && scanResult != nil && scanResult.FilterResult != nil {
-			newTargets := ExtractNextLevelTargets(scanResult.FilterResult.ValidPages, alreadyScanned)
+		// 更新 Target (以最后一次扫描的为准)
+		finalResult.Target = scanResult.Target
 
-			var validNewTargets []string
-			for _, nt := range newTargets {
-				alreadyScanned[nt] = true
-				validNewTargets = append(validNewTargets, nt)
-			}
-			currentTargets = validNewTargets
+		// 返回有效页面供递归逻辑使用
+		return scanResult.FilterResult.ValidPages, nil
+	}
+
+	// 定义数据获取器 (用于目录验证等精确请求)
+	fetcher := func(urls []string) []interfaces.HTTPResponse {
+		// 使用精确扫描方法，不经过字典生成器
+		responses, _ := da.engine.ScanExactURLs(urls)
+		if responses == nil {
+			return nil
 		}
+
+		var res []interfaces.HTTPResponse
+		for _, r := range responses {
+			if r != nil {
+				res = append(res, *r)
+			}
+		}
+		return res
+	}
+
+	// 创建共享过滤器
+	var recursiveFilter *ResponseFilter
+	if depth > 0 {
+		// 优先使用 Engine 配置的 FilterConfig
+		if cfg := da.engine.getFilterConfig(); cfg != nil {
+			recursiveFilter = NewResponseFilter(cfg)
+		} else {
+			recursiveFilter = CreateResponseFilterFromExternal()
+		}
+	}
+
+	// 执行递归扫描
+	// 注意：RunRecursiveScan 的返回值我们在这里可以忽略，因为我们在闭包里收集了完整结果
+	_, err := RunRecursiveScan(
+		collectedURLs,
+		depth,
+		layerScanner,
+		fetcher,
+		recursiveFilter,
+	)
+
+	if err != nil {
+		return nil, err
 	}
 
 	// 扫描完成后清空已采集的URL，等待下一轮采集

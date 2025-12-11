@@ -1,6 +1,7 @@
 package fingerprint
 
 import (
+	"veo/pkg/utils/httpclient"
 	"veo/pkg/utils/logger"
 	"veo/proxy"
 )
@@ -57,8 +58,12 @@ func (fm *FingerprintModule) Start() error {
 // 此方法由模块管理器调用，注入dirscan模块的HTTP客户端
 func (fm *FingerprintModule) SetHTTPClient(client interface{}) {
 	if fm.addon != nil {
-		fm.addon.SetHTTPClient(client)
-		logger.Debug("HTTP客户端已设置，支持主动探测功能")
+		if c, ok := client.(httpclient.HTTPClientInterface); ok {
+			fm.addon.SetHTTPClient(c)
+			logger.Debug("HTTP客户端已设置，支持主动探测功能")
+		} else {
+			logger.Warnf("注入的HTTP客户端类型不兼容: %T", client)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"veo/pkg/types"
+	"veo/pkg/utils/httpclient"
 
 	"gopkg.in/yaml.v3"
 )
@@ -45,25 +46,18 @@ type EngineConfig struct {
 // Engine 指纹识别引擎
 type Engine struct {
 	config                   *EngineConfig
-	rules                    map[string]*FingerprintRule // 规则映射表
-	matches                  []*FingerprintMatch         // 匹配结果
+	ruleManager              *RuleManager        // 规则管理器（负责规则加载和存储）
+	matches                  []*FingerprintMatch // 匹配结果
 	dslParser                *DSLParser                  // DSL解析器
 	mu                       sync.RWMutex                // 读写锁
 	stats                    *Statistics                 // 统计信息
-	outputCache              map[string]bool             // 已输出指纹的域名缓存
-	outputMutex              sync.RWMutex                // 输出缓存的读写锁
-	iconCache                map[string]string           // 图标缓存：URL->MD5哈希值
-	iconMutex                sync.RWMutex                // 图标缓存的读写锁
-	iconMatchCache           map[string]bool             // icon() 比较缓存：URL+Hash -> 匹配结果
-	iconMatchMutex           sync.RWMutex
+	iconCache                *IconCache                  // 图标缓存组件
 	staticExtensions         []string
 	staticContentTypes       []string
 	staticFileFilterEnabled  bool
 	contentTypeFilterEnabled bool
-	showSnippet              bool
-	showRules                bool
-	consoleSnippetEnabled    bool // 控制是否在控制台输出指纹匹配片段
-	loadedSummaries          []string // 已加载规则文件摘要，例如 finger.yaml:754
+	showSnippet              bool            // 是否捕获snippet(用于报告)
+	outputFormatter          OutputFormatter // 输出格式化器(可选,nil表示不输出)
 }
 
 // StringList 支持标量或数组的字符串列表解析
@@ -177,9 +171,9 @@ type DSLContext struct {
 	Body       string
 	URL        string
 	Method     string
-	HTTPClient interface{} // HTTP客户端（用于icon()函数主动探测）- 临时使用interface{}
-	BaseURL    string      // 基础URL（协议+主机，用于构造完整图标路径）
-	Engine     *Engine     // 引擎实例（用于访问图标缓存）
+	HTTPClient httpclient.HTTPClientInterface // HTTP客户端（用于icon()函数主动探测）
+	BaseURL    string                         // 基础URL（协议+主机，用于构造完整图标路径）
+	Engine     *Engine                        // 引擎实例（用于访问图标缓存）
 }
 
 // DSLParser DSL解析器

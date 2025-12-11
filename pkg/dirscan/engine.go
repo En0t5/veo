@@ -81,22 +81,11 @@ func (e *Engine) PerformScan(collectorInstance interfaces.URLCollectorInterface)
 	return e.PerformScanWithOptions(collectorInstance, false)
 }
 
-// PerformScanWithOptions 执行扫描（支持选项）
-func (e *Engine) PerformScanWithOptions(collectorInstance interfaces.URLCollectorInterface, recursive bool) (*ScanResult, error) {
+// PerformScanWithFilter 执行扫描（支持自定义过滤器）
+func (e *Engine) PerformScanWithFilter(collectorInstance interfaces.URLCollectorInterface, recursive bool, filter *ResponseFilter) (*ScanResult, error) {
 	startTime := time.Now()
 
-	// 1. 生成扫描URL（内部会处理URL收集为空的情况）
-	// [修改] 传递 recursive 参数给 GenerateURLsFromCollector
-	// 注意：这里需要类型断言或修改 GenerateURLsFromCollector 的调用方式
-	// 因为我们刚刚修改了 generator.go 中的 GenerateURLsFromCollector 方法
-	// 但是我们需要通过 generator 实例调用
-	// generator := NewURLGenerator()
-	// scanURLs := generator.GenerateURLsFromCollector(collectorInstance, recursive)
-	
-	// 在 engine.go 中，我们之前是这样调用的：
-	// scanURLs, err := e.generateScanURLs(collectorInstance)
-	// 我们需要修改 e.generateScanURLs 方法来接受 recursive 参数
-
+	// 1. 生成扫描URL
 	scanURLs, err := e.generateScanURLs(collectorInstance, recursive)
 	if err != nil {
 		return nil, fmt.Errorf("生成扫描URL失败: %v", err)
@@ -109,8 +98,7 @@ func (e *Engine) PerformScanWithOptions(collectorInstance interfaces.URLCollecto
 	logger.Debugf("生成扫描URL: %d个", len(scanURLs))
 	atomic.StoreInt64(&e.stats.TotalGenerated, int64(len(scanURLs)))
 
-	// 3. 执行HTTP请求
-	// 在开始处理前显示确认信息（显示实际的并发数）
+	// 2. 执行HTTP请求
 	actualConcurrency := e.getActualConcurrency()
 	logger.Infof("%d URL，Threads: %d，Random UA: true", len(scanURLs), actualConcurrency)
 
@@ -126,8 +114,8 @@ func (e *Engine) PerformScanWithOptions(collectorInstance interfaces.URLCollecto
 	logger.Debugf("HTTP扫描完成，收到 %d 个响应", len(responses))
 	atomic.StoreInt64(&e.stats.TotalRequests, int64(len(responses)))
 
-	// 4. 应用过滤器
-	filterResult, err := e.applyFilter(responses)
+	// 3. 应用过滤器
+	filterResult, err := e.applyFilter(responses, filter)
 	if err != nil {
 		return nil, fmt.Errorf("响应过滤失败: %v", err)
 	}
@@ -136,7 +124,7 @@ func (e *Engine) PerformScanWithOptions(collectorInstance interfaces.URLCollecto
 	logger.Debugf("过滤完成 - 总响应: %d, 有效结果: %d",
 		len(responses), len(filterResult.ValidPages))
 
-	// 5. 创建扫描结果
+	// 4. 创建扫描结果
 	endTime := time.Now()
 	result := &ScanResult{
 		Target:        e.extractTarget(responses),
@@ -149,7 +137,7 @@ func (e *Engine) PerformScanWithOptions(collectorInstance interfaces.URLCollecto
 		Duration:      endTime.Sub(startTime),
 	}
 
-	// 7. 更新统计信息
+	// 5. 更新统计信息
 	e.mu.Lock()
 	e.lastScanResult = result
 	e.stats.LastScanTime = endTime
@@ -159,6 +147,29 @@ func (e *Engine) PerformScanWithOptions(collectorInstance interfaces.URLCollecto
 
 	logger.Debugf("扫描执行完成，耗时: %v", result.Duration)
 	return result, nil
+}
+
+// PerformScanWithOptions 执行扫描（支持选项）
+func (e *Engine) PerformScanWithOptions(collectorInstance interfaces.URLCollectorInterface, recursive bool) (*ScanResult, error) {
+	return e.PerformScanWithFilter(collectorInstance, recursive, nil)
+}
+
+// ScanExactURLs 对指定的URL列表执行扫描（不进行字典生成）
+// 专门用于递归验证或精确目标扫描
+func (e *Engine) ScanExactURLs(urls []string) ([]*interfaces.HTTPResponse, error) {
+	if len(urls) == 0 {
+		return nil, nil
+	}
+
+	logger.Debugf("执行精确URL扫描: %d 个", len(urls))
+	
+	// 直接调用 HTTP 请求执行逻辑
+	responses, err := e.performHTTPRequests(urls)
+	if err != nil {
+		return nil, err
+	}
+	
+	return responses, nil
 }
 
 // generateScanURLs 生成扫描URL
@@ -248,11 +259,13 @@ func (e *Engine) getActualConcurrency() int {
 }
 
 // applyFilter 应用过滤器
-func (e *Engine) applyFilter(responses []*interfaces.HTTPResponse) (*interfaces.FilterResult, error) {
+func (e *Engine) applyFilter(responses []*interfaces.HTTPResponse, externalFilter *ResponseFilter) (*interfaces.FilterResult, error) {
 	logger.Debug("开始应用响应过滤器")
 
 	var responseFilter *ResponseFilter
-	if cfg := e.getFilterConfig(); cfg != nil {
+	if externalFilter != nil {
+		responseFilter = externalFilter
+	} else if cfg := e.getFilterConfig(); cfg != nil {
 		responseFilter = NewResponseFilter(cfg)
 	} else {
 		responseFilter = CreateResponseFilterFromExternal()
