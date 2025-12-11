@@ -64,6 +64,39 @@ func NewRequestProcessor(config *RequestConfig) *RequestProcessor {
 	return processor
 }
 
+// CloneWithContext 创建当前处理器的副本，复用底层Client，但使用新的上下文和超时设置
+func (rp *RequestProcessor) CloneWithContext(moduleContext string, timeout time.Duration) *RequestProcessor {
+	rp.mu.RLock()
+	defer rp.mu.RUnlock()
+
+	// 浅拷贝配置
+	newConfig := *rp.config
+	if timeout > 0 {
+		newConfig.Timeout = timeout
+	}
+
+	clone := &RequestProcessor{
+		client:               rp.client, // 复用Client
+		config:               &newConfig,
+		userAgentPool:        rp.userAgentPool,
+		titleExtractor:       rp.titleExtractor,
+		moduleContext:        moduleContext,
+		statsUpdater:         rp.statsUpdater,
+		batchMode:            true,
+		customHeaders:        make(map[string]string),
+		authDetector:         auth.NewAuthDetector(),
+		redirectClient:       httpclient.New(nil),
+		redirectSameHostOnly: rp.redirectSameHostOnly,
+	}
+
+	// 复制自定义头部
+	for k, v := range rp.customHeaders {
+		clone.customHeaders[k] = v
+	}
+
+	return clone
+}
+
 // SetRedirectSameHostOnly 控制重定向是否限制同主机
 func (rp *RequestProcessor) SetRedirectSameHostOnly(enabled bool) {
 	rp.mu.Lock()
@@ -173,15 +206,98 @@ func (rp *RequestProcessor) processConcurrentURLs(urls []string, responses *[]*i
 	wg.Wait()
 }
 
-// processURLsWithWorkerPool 使用Worker Pool处理URL列表
-func (rp *RequestProcessor) processURLsWithWorkerPool(urls []string, responses *[]*interfaces.HTTPResponse, responsesMu *sync.Mutex, stats *ProcessingStats) {
+// ProcessURLsWithCallback 处理URL列表，并对每个响应执行回调
+func (rp *RequestProcessor) ProcessURLsWithCallback(urls []string, callback func(*interfaces.HTTPResponse)) []*interfaces.HTTPResponse {
+	// 初始化统计
+	stats := rp.initializeProcessingStats(len(urls), rp.config.MaxConcurrent, rp.config.RandomUserAgent)
+
+	// 更新统计显示器（总请求数）
+	if rp.statsUpdater != nil {
+		if rp.IsBatchMode() {
+			rp.statsUpdater.AddTotalRequests(int64(len(urls)))
+		} else {
+			rp.statsUpdater.SetTotalRequests(int64(len(urls)))
+		}
+	}
+
+	// 初始化响应收集
+	responses := make([]*interfaces.HTTPResponse, 0, len(urls))
+	var responsesMu sync.Mutex
+
+	// 创建进度完成信号通道
+	progressDone := make(chan struct{})
+
+	// 使用Worker Pool处理URL
+	rp.processURLsWithWorkerPoolAndCallback(urls, &responses, &responsesMu, stats, callback)
+
+	// 完成处理
+	rp.finalizeProcessing(progressDone, stats, len(responses))
+
+	return responses
+}
+
+// processURLsWithWorkerPoolAndCallback 使用Worker Pool处理URL列表，支持回调
+func (rp *RequestProcessor) processURLsWithWorkerPoolAndCallback(urls []string, responses *[]*interfaces.HTTPResponse, responsesMu *sync.Mutex, stats *ProcessingStats, callback func(*interfaces.HTTPResponse)) {
 	// 创建并启动工作池
 	workerPool := rp.createAndStartWorkerPool()
 	defer workerPool.Stop()
 
 	// 提交任务并收集结果
 	taskSubmissionDone := rp.submitTasksAsync(workerPool, urls)
-	rp.collectResults(workerPool, urls, responses, responsesMu, stats, taskSubmissionDone)
+	rp.collectResultsWithCallback(workerPool, urls, responses, responsesMu, stats, taskSubmissionDone, callback)
+}
+
+// collectResultsWithCallback 收集处理结果并执行回调
+func (rp *RequestProcessor) collectResultsWithCallback(workerPool *WorkerPool, urls []string, responses *[]*interfaces.HTTPResponse, responsesMu *sync.Mutex, stats *ProcessingStats, taskSubmissionDone <-chan struct{}, callback func(*interfaces.HTTPResponse)) {
+	processedCount := 0
+	timeoutDuration := 30 * time.Second
+
+	// 创建结果收集的context，支持提前取消
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration+10*time.Second)
+	defer cancel()
+
+	for processedCount < len(urls) {
+		select {
+		case result := <-workerPool.GetResult():
+			rp.processWorkerResult(result, responses, responsesMu, stats)
+			if callback != nil && result.Response != nil {
+				callback(result.Response)
+			}
+			processedCount++
+
+		case <-time.After(timeoutDuration):
+			logger.Warnf("Worker Pool处理超时，尝试收集剩余结果...")
+			rp.collectRemainingResultsWithCallback(workerPool, len(urls)-processedCount, responses, responsesMu, stats, callback)
+			return
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// collectRemainingResultsWithCallback 收集剩余结果并执行回调
+func (rp *RequestProcessor) collectRemainingResultsWithCallback(workerPool *WorkerPool, maxResults int, responses *[]*interfaces.HTTPResponse, responsesMu *sync.Mutex, stats *ProcessingStats, callback func(*interfaces.HTTPResponse)) {
+	timeout := 100 * time.Millisecond
+	for i := 0; i < maxResults && i < 50; i++ {
+		select {
+		case result := <-workerPool.GetResult():
+			rp.processWorkerResult(result, responses, responsesMu, stats)
+			if callback != nil && result.Response != nil {
+				callback(result.Response)
+			}
+		case <-time.After(timeout):
+			if timeout < 500*time.Millisecond {
+				timeout += 50 * time.Millisecond
+			}
+			break
+		}
+	}
+}
+
+// processURLsWithWorkerPool 使用Worker Pool处理URL列表
+func (rp *RequestProcessor) processURLsWithWorkerPool(urls []string, responses *[]*interfaces.HTTPResponse, responsesMu *sync.Mutex, stats *ProcessingStats) {
+	rp.processURLsWithWorkerPoolAndCallback(urls, responses, responsesMu, stats, nil)
 }
 
 // createAndStartWorkerPool 创建并启动工作池

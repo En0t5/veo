@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"veo/internal/core/config"
@@ -38,7 +42,7 @@ type ScanController struct {
 	encodingDetector       *fingerprint.EncodingDetector // 编码检测器
 	probedHosts            map[string]bool               // 已探测的主机缓存（用于path探测去重）
 	probedMutex            sync.RWMutex                  // 探测缓存锁
-	progressTracker        *FingerprintProgressTracker   // 指纹识别进度跟踪器
+	// progressTracker        *FingerprintProgressTracker   // 已移除：统一使用StatsDisplay
 	statsDisplay           *stats.StatsDisplay           // 统计显示器
 	lastTargets            []string                      // 最近解析的目标列表
 	showFingerprintSnippet bool                          // 是否展示指纹匹配内容
@@ -144,17 +148,17 @@ func NewScanController(args *CLIArgs, cfg *config.Config) *ScanController {
 	if fpEngine != nil {
 		// 启用snippet捕获(用于报告)
 		fpEngine.EnableSnippet(true)
-		
+
 		// 创建OutputFormatter并注入到Engine
 		var outputFormatter fingerprint.OutputFormatter
 		if args.JSONOutput {
 			outputFormatter = fingerprint.NewJSONOutputFormatter()
 		} else {
 			outputFormatter = fingerprint.NewConsoleOutputFormatter(
-				true,            // logMatches
-				true,            // showSnippet - 始终捕获
-				ruleEnabled,     // showRules
-				snippetEnabled,  // consoleSnippetEnabled
+				true,           // logMatches
+				true,           // showSnippet - 始终捕获
+				ruleEnabled,    // showRules
+				snippetEnabled, // consoleSnippetEnabled
 			)
 		}
 		fpEngine.SetOutputFormatter(outputFormatter)
@@ -209,6 +213,11 @@ func (sc *ScanController) runActiveMode() error {
 
 	logger.Debugf("解析到 %d 个目标", len(targets))
 
+	// 打印有效性筛选结果
+	if !sc.args.JSONOutput {
+		logger.Infof("经有效性筛选，有效Host数量: %d", len(targets))
+	}
+
 	if sc.statsDisplay.IsEnabled() {
 		sc.statsDisplay.SetTotalHosts(int64(len(targets)))
 		logger.Debugf("统计显示器：设置总主机数 = %d", len(targets))
@@ -219,16 +228,48 @@ func (sc *ScanController) runActiveMode() error {
 	var fingerprintResults []interfaces.HTTPResponse
 
 	orderedModules := sc.getOptimizedModuleOrder()
-	allResults, dirscanResults, fingerprintResults = sc.executeModulesSequence(orderedModules, targets)
+
+	// [新增] 信号处理：捕获Ctrl+C
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// 使用done通道来同步扫描完成
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		// 传递context给executeModulesSequence，但这需要修改executeModulesSequence签名
+		// 或者，我们通过修改RequestProcessor的配置或状态来停止
+		// 更好的方式是重构executeModulesSequence以接受context，或者在此处简单地等待扫描完成
+		// 由于重构涉及多个文件，我们先保持现有逻辑，但在此处监听信号并手动调用报告生成
+		allResults, dirscanResults, fingerprintResults = sc.executeModulesSequenceWithContext(ctx, orderedModules, targets)
+	}()
+
+	select {
+	case <-done:
+		// 正常完成
+	case <-sigChan:
+		cancel() // 触发context取消
+
+		// 等待工作协程优雅退出并返回已收集的结果
+		// 给模块一点时间来响应取消信号并返回数据
+		logger.Info("Waiting for current tasks to complete...")
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			logger.Warn("停止超时，强制保存现有结果 (部分数据可能丢失)")
+		}
+
+	}
 
 	return sc.finalizeScan(allResults, dirscanResults, fingerprintResults)
 }
 
-func (sc *ScanController) GetRequestProcessor() *requests.RequestProcessor {
-	return sc.requestProcessor
-}
-
-func (sc *ScanController) executeModulesSequence(modules []string, targets []string) ([]interfaces.HTTPResponse, []interfaces.HTTPResponse, []interfaces.HTTPResponse) {
+// executeModulesSequenceWithContext 是 executeModulesSequence 的包装，支持Context取消
+func (sc *ScanController) executeModulesSequenceWithContext(ctx context.Context, modules []string, targets []string) ([]interfaces.HTTPResponse, []interfaces.HTTPResponse, []interfaces.HTTPResponse) {
 	var allResults []interfaces.HTTPResponse
 	var dirResults []interfaces.HTTPResponse
 	var fingerprintResults []interfaces.HTTPResponse
@@ -238,9 +279,21 @@ func (sc *ScanController) executeModulesSequence(modules []string, targets []str
 	}
 
 	for i, moduleName := range modules {
+		// 检查Context是否取消
+		select {
+		case <-ctx.Done():
+			logger.Warn("扫描已取消，停止执行剩余模块")
+			return allResults, dirResults, fingerprintResults
+		default:
+		}
+
 		logger.Debugf("开始执行模块: %s (%d/%d)", moduleName, i+1, len(modules))
 
-		moduleResults, err := sc.runModuleForTargets(moduleName, targets)
+		// 注意：这里需要确保 runModuleForTargets 能够响应中断或快速返回
+		// 目前 runModuleForTargets 内部没有完全传递 ctx，但我们已经在 scanner_fingerprint.go 中优化了超时
+		// 下一步优化应该是将 ctx 传递给 runModuleForTargets
+		// 临时方案：如果模块执行期间被中断，结果可能不完整，但我们会保存已有的
+		moduleResults, err := sc.runModuleForTargetsWithContext(ctx, moduleName, targets)
 		if err != nil {
 			logger.Errorf("模块 %s 执行失败: %v", moduleName, err)
 			continue
@@ -262,6 +315,11 @@ func (sc *ScanController) executeModulesSequence(modules []string, targets []str
 
 	return allResults, dirResults, fingerprintResults
 }
+
+func (sc *ScanController) GetRequestProcessor() *requests.RequestProcessor {
+	return sc.requestProcessor
+}
+
 
 func (sc *ScanController) finalizeScan(allResults, dirResults, fingerprintResults []interfaces.HTTPResponse) error {
 	logger.Debugf("所有模块执行完成，总结果数: %d", len(allResults))
@@ -336,14 +394,41 @@ func (sc *ScanController) getOptimizedModuleOrder() []string {
 	return orderedModules
 }
 
-func (sc *ScanController) runModuleForTargets(moduleName string, targets []string) ([]interfaces.HTTPResponse, error) {
+
+func (sc *ScanController) runModuleForTargetsWithContext(ctx context.Context, moduleName string, targets []string) ([]interfaces.HTTPResponse, error) {
+	// 简单的包装，未来应该修改 runDirscanModule 和 runFingerprintModule 以接受 Context
+	// 目前我们主要关注指纹识别模块的并发控制
 
 	switch moduleName {
 	case "dirscan":
-		return sc.runDirscanModule(targets)
+		// 目录扫描集成 Context
+		return sc.runDirscanModule(ctx, targets)
 	case "finger":
+		// 指纹模块已经部分集成了 Context (通过 runConcurrentFingerprint)
+		// 但我们需要确保它能感知到外部的 ctx 取消
+		// 由于 runFingerprintModule 签名未变，我们这里做一些特定的处理
 
-		return sc.runFingerprintModule(targets)
+		// 如果是指纹模块，我们使用一个能够感知 context 的 wrapper
+		// 注意：runConcurrentFingerprint 内部创建了自己的 context，这不理想
+		// 下一步优化：修改 runFingerprintModule 接受 context
+		// 临时方案：我们依靠 runActiveMode 中的 cancel() 来停止 RequestProcessor (如果它支持的话)
+		// 或者，我们修改 runConcurrentFingerprint 来接受外部 context (需要改动 scanner_fingerprint.go)
+
+		// 实际上，scanner_fingerprint.go 中的 runConcurrentFingerprint 创建了一个 WithCancel(context.Background())
+		// 我们无法直接注入 ctx，除非修改签名。
+		// 为了最小化改动，我们假设 runFingerprintModule 会因为 RequestProcessor 被停止或超时而返回
+
+		// 但为了更好的效果，我们将在此处修改 runFingerprintModule 的逻辑（通过 channel 或修改方法）
+		// 由于不能轻易修改接口，我们先调用原方法。
+		// 实际上，我们在 runActiveMode 中 cancel() 了 ctx，但这并没有传递进去。
+
+		// [修正] 我们需要修改 runFingerprintModule 及其调用的 runConcurrentFingerprint 来支持 Context
+		// 由于这涉及多个文件修改，我们将在此处先调用原始方法，
+		// 但依赖于 RequestProcessor 或其他组件的全局停止（如果实现了的话）。
+		// 更好的做法是：修改 runFingerprintModule 签名。
+		// 鉴于这是一个 "fix" 任务，我们在此处引入 runFingerprintModuleWithContext
+		return sc.runFingerprintModuleWithContext(ctx, targets)
+
 	default:
 		return nil, fmt.Errorf("不支持的模块: %s", moduleName)
 	}

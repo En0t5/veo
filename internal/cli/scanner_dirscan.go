@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"veo/internal/scheduler"
 	"veo/pkg/dirscan"
@@ -11,7 +14,7 @@ import (
 	"veo/pkg/utils/logger"
 )
 
-func (sc *ScanController) runDirscanModule(targets []string) ([]interfaces.HTTPResponse, error) {
+func (sc *ScanController) runDirscanModule(ctx context.Context, targets []string) ([]interfaces.HTTPResponse, error) {
 	originalContext := sc.requestProcessor.GetModuleContext()
 	sc.requestProcessor.SetModuleContext("dirscan")
 	
@@ -50,14 +53,20 @@ func (sc *ScanController) runDirscanModule(targets []string) ([]interfaces.HTTPR
 		recursive := depth > 0
 		// 多目标优化：判断是否使用并发扫描
 		if len(layerTargets) > 1 {
-			return sc.runConcurrentDirscan(layerTargets, filter, recursive)
+			return sc.runConcurrentDirscan(ctx, layerTargets, filter, recursive)
 		} else {
-			return sc.runSequentialDirscan(layerTargets, filter, recursive)
+			return sc.runSequentialDirscan(ctx, layerTargets, filter, recursive)
 		}
 	}
 
 	// 定义数据获取器（用于目录验证）
 	fetcher := func(urls []string) []interfaces.HTTPResponse {
+		// 检查Context取消
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
 		responses := sc.requestProcessor.ProcessURLs(urls)
 		var result []interfaces.HTTPResponse
 		for _, r := range responses {
@@ -74,6 +83,7 @@ func (sc *ScanController) runDirscanModule(targets []string) ([]interfaces.HTTPR
 	maxDepth := sc.args.Depth
 
 	allResults, _ = dirscan.RunRecursiveScan(
+		ctx,
 		targets,
 		maxDepth,
 		layerScanner,
@@ -84,41 +94,51 @@ func (sc *ScanController) runDirscanModule(targets []string) ([]interfaces.HTTPR
 	return allResults, nil
 }
 
-func (sc *ScanController) runConcurrentDirscan(targets []string, filter *dirscan.ResponseFilter, recursive bool) ([]interfaces.HTTPResponse, error) {
+func (sc *ScanController) runConcurrentDirscan(ctx context.Context, targets []string, filter *dirscan.ResponseFilter, recursive bool) ([]interfaces.HTTPResponse, error) {
 	logger.Debugf("目标数量: %d", len(targets))
 
 	// 创建目标调度器
-	scheduler := scheduler.NewTargetScheduler(targets, sc.config)
+	scheduler := scheduler.NewTargetScheduler(ctx, targets, sc.config)
 	scheduler.SetRecursive(recursive)
+
+	// [新增] 传递CLI超时设置给调度器
+	if sc.timeoutSeconds > 0 {
+		scheduler.SetRequestTimeout(time.Duration(sc.timeoutSeconds) * time.Second)
+	}
 
 	// 设置基础请求处理器，确保统计更新正常工作
 	scheduler.SetBaseRequestProcessor(sc.requestProcessor)
 
+	// [新增] 实时结果处理回调
+	var allResults []interfaces.HTTPResponse
+	var resultsMu sync.Mutex
+
+	scheduler.SetResultCallback(func(target string, resp *interfaces.HTTPResponse) {
+		sc.handleRealTimeResult(target, resp, filter, &allResults, &resultsMu)
+	})
+
 	// 执行并发扫描
-	targetResults, err := scheduler.ExecuteConcurrentScan()
+	// 注意：虽然 ExecuteConcurrentScan 返回所有原始结果，但我们已经在回调中处理了有效结果
+	_, err := scheduler.ExecuteConcurrentScan()
 	if err != nil {
 		return nil, fmt.Errorf("多目标并发扫描失败: %v", err)
-	}
-
-	// [修改] 对每个目标的结果独立应用过滤器，然后合并
-	var allResults []interfaces.HTTPResponse
-	for target, responses := range targetResults {
-		logger.Debugf("处理目标 %s 的 %d 个响应", target, len(responses))
-
-		// 使用 processTargetResponses 统一处理
-		validPages, _ := sc.processTargetResponses(responses, target, filter)
-		if len(validPages) > 0 {
-			allResults = append(allResults, validPages...)
-		}
 	}
 
 	return allResults, nil
 }
 
-func (sc *ScanController) runSequentialDirscan(targets []string, filter *dirscan.ResponseFilter, recursive bool) ([]interfaces.HTTPResponse, error) {
+func (sc *ScanController) runSequentialDirscan(ctx context.Context, targets []string, filter *dirscan.ResponseFilter, recursive bool) ([]interfaces.HTTPResponse, error) {
 	var allResults []interfaces.HTTPResponse
 
 	for _, target := range targets {
+		// 检查Context取消
+		select {
+		case <-ctx.Done():
+			logger.Warn("扫描已取消，停止顺序扫描")
+			return allResults, nil
+		default:
+		}
+
 		// 生成扫描URL
 		scanURLs := sc.generateDirscanURLs(target, recursive)
 		logger.Debugf("为 %s 生成了 %d 个扫描URL", target, len(scanURLs))
@@ -135,14 +155,11 @@ func (sc *ScanController) runSequentialDirscan(targets []string, filter *dirscan
 			}
 		}
 
-		// 发起HTTP请求
-		responses := sc.requestProcessor.ProcessURLs(scanURLs)
-
-		// 使用 processTargetResponses 统一处理
-		validPages, _ := sc.processTargetResponses(responses, target, filter)
-		if len(validPages) > 0 {
-			allResults = append(allResults, validPages...)
-		}
+		// 发起HTTP请求（实时处理）
+		// 使用 ProcessURLsWithCallback 替代 ProcessURLs
+		sc.requestProcessor.ProcessURLsWithCallback(scanURLs, func(resp *interfaces.HTTPResponse) {
+			sc.handleRealTimeResult(target, resp, filter, &allResults, nil)
+		})
 
 		// 更新已完成主机数统计（单目标扫描）
 		if sc.statsDisplay.IsEnabled() {
@@ -194,4 +211,23 @@ func (sc *ScanController) generateDirscanURLs(target string, recursive bool) []s
 		return sc.urlGenerator.GenerateRecursiveURLs(scanTargets)
 	}
 	return sc.urlGenerator.GenerateURLs(scanTargets)
+}
+
+// handleRealTimeResult 处理实时扫描结果（DRY优化）
+func (sc *ScanController) handleRealTimeResult(target string, resp *interfaces.HTTPResponse, filter *dirscan.ResponseFilter, results *[]interfaces.HTTPResponse, mu *sync.Mutex) {
+	if resp == nil {
+		return
+	}
+	// 调用 processTargetResponses 处理单个响应（包含过滤、去重、打印）
+	validPages, _ := sc.processTargetResponses([]*interfaces.HTTPResponse{resp}, target, filter)
+
+	if len(validPages) > 0 {
+		if mu != nil {
+			mu.Lock()
+		}
+		*results = append(*results, validPages...)
+		if mu != nil {
+			mu.Unlock()
+		}
+	}
 }

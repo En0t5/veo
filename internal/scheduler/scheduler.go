@@ -24,6 +24,8 @@ type TargetScheduler struct {
 	cancel                 context.CancelFunc
 	baseRequestProcessor   *processor.RequestProcessor // 基础请求处理器（支持统计更新）
 	recursive              bool                        // 是否递归模式
+	resultCallback         func(string, *interfaces.HTTPResponse) // 结果回调
+	requestTimeout         time.Duration               // 单次请求超时时间
 }
 
 // TargetWorker 目标工作器
@@ -34,6 +36,7 @@ type TargetWorker struct {
 	requestProcessor *processor.RequestProcessor
 	ctx              context.Context
 	recursive        bool
+	resultCallback   func(string, *interfaces.HTTPResponse)
 }
 
 // TargetResult 目标扫描结果
@@ -45,8 +48,9 @@ type TargetResult struct {
 }
 
 // NewTargetScheduler 创建目标调度器
-func NewTargetScheduler(targets []string, cfg *config.Config) *TargetScheduler {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewTargetScheduler(ctx context.Context, targets []string, cfg *config.Config) *TargetScheduler {
+	// 使用传入的 context 创建子 context
+	ctx, cancel := context.WithCancel(ctx)
 
 	// 计算资源分配
 	maxTargetWorkers, urlConcurrentPerTarget := calculateResourceAllocation(targets, cfg)
@@ -74,11 +78,21 @@ func (ts *TargetScheduler) SetBaseRequestProcessor(processor *processor.RequestP
 	logger.Debug("设置基础请求处理器，支持统计更新")
 }
 
-// ExecuteConcurrentScan 执行并发扫描（修复：添加超时和取消机制）
+// SetResultCallback 设置结果回调函数
+func (ts *TargetScheduler) SetResultCallback(callback func(string, *interfaces.HTTPResponse)) {
+	ts.resultCallback = callback
+}
+
+// SetRequestTimeout 设置请求超时时间
+func (ts *TargetScheduler) SetRequestTimeout(timeout time.Duration) {
+	ts.requestTimeout = timeout
+}
+
+// ExecuteConcurrentScan 执行并发扫描（修复：移除硬编码超时，依赖上下文控制）
 func (ts *TargetScheduler) ExecuteConcurrentScan() (map[string][]*interfaces.HTTPResponse, error) {
-	// 创建带超时的context
-	scanCtx, scanCancel := context.WithTimeout(ts.ctx, 10*time.Minute)
-	defer scanCancel()
+	// 使用传入的 context，不再设置额外的超时时间
+	// 对于大规模扫描，硬编码的超时（如10分钟）会导致任务意外中断
+	scanCtx := ts.ctx
 
 	var wg sync.WaitGroup
 	resultChan := make(chan TargetResult, len(ts.targets))
@@ -125,7 +139,7 @@ func (ts *TargetScheduler) ExecuteConcurrentScan() (map[string][]*interfaces.HTT
 		close(resultChan)
 	}()
 
-	// 收集结果（修复：添加超时和取消支持）
+	// 收集结果（修复：移除硬编码超时，依赖上下文控制）
 	return ts.collectResultsWithTimeout(scanCtx, resultChan, done)
 }
 
@@ -205,9 +219,10 @@ func (ts *TargetScheduler) processTargetWithTimeout(ctx context.Context, index i
 	}
 }
 
-// collectResultsWithTimeout 收集结果（新增：支持超时和取消）
+// collectResultsWithTimeout 收集结果（新增：移除硬编码超时）
 func (ts *TargetScheduler) collectResultsWithTimeout(ctx context.Context, resultChan <-chan TargetResult, done <-chan struct{}) (map[string][]*interfaces.HTTPResponse, error) {
-	timeout := 15 * time.Minute // 总体超时时间
+	// 移除总体超时时间，依赖任务自然完成或用户手动取消
+	// timeout := 15 * time.Minute
 
 	for {
 		select {
@@ -223,9 +238,12 @@ func (ts *TargetScheduler) collectResultsWithTimeout(ctx context.Context, result
 				continue
 			}
 
-			ts.resultsMu.Lock()
-			ts.results[result.Target] = result.Responses
-			ts.resultsMu.Unlock()
+			// [内存优化] 如果有回调且响应列表为空（由回调处理），则不存储结果
+			if len(result.Responses) > 0 {
+				ts.resultsMu.Lock()
+				ts.results[result.Target] = result.Responses
+				ts.resultsMu.Unlock()
+			}
 
 			logger.Debugf("收集到目标 %s 的结果，响应数: %d", result.Target, len(result.Responses))
 
@@ -237,39 +255,56 @@ func (ts *TargetScheduler) collectResultsWithTimeout(ctx context.Context, result
 			logger.Warnf("目标调度被取消，已收集 %d 个结果", len(ts.results))
 			return ts.results, ctx.Err()
 
-		case <-time.After(timeout):
-			logger.Warnf("目标调度超时，已收集 %d 个结果", len(ts.results))
-			return ts.results, fmt.Errorf("目标调度超时")
+		case <-time.After(30 * time.Second):
+			// 仅在任务标记为完成但通道未关闭时触发超时
+			// 这里只是为了避免死锁，实际上 channel 关闭会先触发上面的 !ok
+			if isDone(done) {
+				logger.Warnf("目标调度完成信号已发出，但结果收集超时")
+				return ts.results, nil
+			}
 		}
+	}
+}
+
+// isDone 检查 channel 是否已关闭
+func isDone(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
 	}
 }
 
 // createTargetWorker 创建目标工作器
 func (ts *TargetScheduler) createTargetWorker(id int, target string) *TargetWorker {
-	// 创建请求处理器配置
-	requestConfig := &processor.RequestConfig{
-		Timeout:        time.Duration(ts.config.Addon.Request.Timeout) * time.Second,
-		MaxRetries:     3,
-		MaxConcurrent:  ts.urlConcurrentPerTarget,
-		FollowRedirect: true,
-		MaxBodySize:    ts.config.Addon.Request.MaxResponseBodySize,
+	// 确定超时时间
+	timeout := time.Duration(ts.config.Addon.Request.Timeout) * time.Second
+	// 优先使用手动设置的超时（来自CLI）
+	if ts.requestTimeout > 0 {
+		timeout = ts.requestTimeout
 	}
 
-	// 创建新的请求处理器
-	requestProcessor := processor.NewRequestProcessor(requestConfig)
+	var requestProcessor *processor.RequestProcessor
+	moduleCtx := fmt.Sprintf("target-%s", extractDomainFromURL(target))
 
-	// 如果有基础请求处理器，复制其统计更新器
+	// [资源优化] 复用RequestProcessor底层Client
 	if ts.baseRequestProcessor != nil {
-		// 获取基础请求处理器的统计更新器并设置到新处理器
-		// 注意：这里需要添加一个方法来获取统计更新器
-		ts.copyStatsUpdater(ts.baseRequestProcessor, requestProcessor)
-		logger.Debugf("创建请求处理器并复制统计更新器: target-%s", extractDomainFromURL(target))
+		requestProcessor = ts.baseRequestProcessor.CloneWithContext(moduleCtx, timeout)
+		logger.Debugf("复用BaseRequestProcessor创建Worker: %s", moduleCtx)
 	} else {
-		logger.Debugf("创建新的请求处理器（不支持统计更新）: target-%s", extractDomainFromURL(target))
+		// 回退模式：创建新的处理器（通常不应发生，因为Controller会设置Base）
+		requestConfig := &processor.RequestConfig{
+			Timeout:        timeout,
+			MaxRetries:     3,
+			MaxConcurrent:  ts.urlConcurrentPerTarget,
+			FollowRedirect: true,
+			MaxBodySize:    ts.config.Addon.Request.MaxResponseBodySize,
+		}
+		requestProcessor = processor.NewRequestProcessor(requestConfig)
+		requestProcessor.SetModuleContext(moduleCtx)
+		logger.Debugf("创建新的RequestProcessor (无Base): %s", moduleCtx)
 	}
-
-	// 设置目标上下文
-	requestProcessor.SetModuleContext(fmt.Sprintf("target-%s", extractDomainFromURL(target)))
 
 	return &TargetWorker{
 		id:               id,
@@ -278,21 +313,7 @@ func (ts *TargetScheduler) createTargetWorker(id int, target string) *TargetWork
 		requestProcessor: requestProcessor,
 		ctx:              ts.ctx,
 		recursive:        ts.recursive,
-	}
-}
-
-// copyStatsUpdater 复制统计更新器
-func (ts *TargetScheduler) copyStatsUpdater(source, target *processor.RequestProcessor) {
-	// 获取源处理器的统计更新器
-	statsUpdater := source.GetStatsUpdater()
-	if statsUpdater != nil {
-		// 设置到目标处理器
-		target.SetStatsUpdater(statsUpdater)
-		// 设置批量扫描模式
-		target.SetBatchMode(true)
-		logger.Debug("成功复制统计更新器并设置批量模式")
-	} else {
-		logger.Debug("源处理器没有统计更新器")
+		resultCallback:   ts.resultCallback,
 	}
 }
 
@@ -306,15 +327,20 @@ func (tw *TargetWorker) generateScanURLs() []string {
 	return tw.urlGenerator.GenerateURLs([]string{tw.target})
 }
 
-// executeRequests 执行HTTP请求
-func (tw *TargetWorker) executeRequests(urls []string) []*interfaces.HTTPResponse {
-	return tw.requestProcessor.ProcessURLs(urls)
-}
-
 // executeRequestsWithTimeout 执行HTTP请求（新增：支持超时和取消）
 func (tw *TargetWorker) executeRequestsWithTimeout(ctx context.Context, urls []string) []*interfaces.HTTPResponse {
-	// 创建带超时的context
-	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// 创建带超时的context，但超时时间设置得更长，或者基于URL数量估算
+	// 简单策略：每个URL给1秒，最少5分钟
+	timeoutDuration := time.Duration(len(urls)) * time.Second
+	if timeoutDuration < 5*time.Minute {
+		timeoutDuration = 5 * time.Minute
+	}
+	// 设置上限，防止过大，例如最大 24 小时
+	if timeoutDuration > 24*time.Hour {
+		timeoutDuration = 24 * time.Hour
+	}
+
+	requestCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
 	defer cancel()
 
 	// 使用channel接收结果，支持超时
@@ -328,7 +354,17 @@ func (tw *TargetWorker) executeRequestsWithTimeout(ctx context.Context, urls []s
 			}
 		}()
 
-		responses := tw.requestProcessor.ProcessURLs(urls)
+		var responses []*interfaces.HTTPResponse
+		if tw.resultCallback != nil {
+			// 如果有回调，使用 ProcessURLsWithCallback
+			// [内存优化] 使用回调时，不需要向上层返回所有原始响应，避免内存积压
+			tw.requestProcessor.ProcessURLsWithCallback(urls, func(resp *interfaces.HTTPResponse) {
+				tw.resultCallback(tw.target, resp)
+			})
+			responses = []*interfaces.HTTPResponse{} // 返回空切片
+		} else {
+			responses = tw.requestProcessor.ProcessURLs(urls)
+		}
 		resultChan <- responses
 	}()
 

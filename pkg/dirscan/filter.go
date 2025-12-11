@@ -491,7 +491,7 @@ func (rf *ResponseFilter) PrintFilterResult(result *interfaces.FilterResult) {
 
 	// 打印最终有效页面
 	if len(result.ValidPages) > 0 {
-		rf.printValidPages(result.ValidPages)
+		rf.PrintValidPages(result.ValidPages)
 	}
 
 	// 打印主要筛选无效页面统计
@@ -557,8 +557,8 @@ func (rf *ResponseFilter) printPrimaryFilteredPages(pages []interfaces.HTTPRespo
 	}
 }
 
-// printValidPages 打印最终有效页面（支持指纹识别）
-func (rf *ResponseFilter) printValidPages(pages []interfaces.HTTPResponse) {
+// PrintValidPages 打印最终有效页面（支持指纹识别）
+func (rf *ResponseFilter) PrintValidPages(pages []interfaces.HTTPResponse) {
 	for idx := range pages {
 		page := &pages[idx]
 

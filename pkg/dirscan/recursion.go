@@ -1,6 +1,7 @@
 package dirscan
 
 import (
+	"context"
 	"strings"
 	"veo/pkg/utils/interfaces"
 	"veo/pkg/utils/logger"
@@ -15,6 +16,7 @@ type LayerScanner func(targets []string, filter *ResponseFilter, depth int) ([]i
 // RunRecursiveScan 执行通用递归扫描
 // 统一封装了递归深度控制、状态去重、下一层提取和验证逻辑
 func RunRecursiveScan(
+	ctx context.Context,
 	initialTargets []string,
 	maxDepth int,
 	layerScanner LayerScanner,
@@ -37,6 +39,14 @@ func RunRecursiveScan(
 	}
 
 	for d := 0; d <= maxDepth; d++ {
+		// 检查Context取消
+		select {
+		case <-ctx.Done():
+			logger.Warn("递归扫描被取消")
+			return allResults, nil
+		default:
+		}
+
 		if len(currentTargets) == 0 {
 			break
 		}

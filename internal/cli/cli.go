@@ -20,15 +20,13 @@ import (
 	"veo/pkg/fingerprint"
 	fpaddon "veo/pkg/fingerprint"
 	"veo/pkg/utils/formatter"
-	"veo/pkg/utils/httpclient"
 	"veo/pkg/utils/interfaces"
 	"veo/pkg/utils/logger"
+	requests "veo/pkg/utils/processor"
 	"veo/pkg/utils/processor/auth"
 	"veo/pkg/utils/shared"
 	"veo/proxy"
 )
-
-// arrayFlags 实现flag.Value接口，支持多个相同参数
 type arrayFlags []string
 
 func (af *arrayFlags) String() string {
@@ -195,7 +193,7 @@ func ParseCLIArgs() *CLIArgs {
 		verbose      = flag.Bool("v", false, "显示指纹匹配规则内容 (默认关闭，可使用 -v 开启)")
 		veryVerbose  = flag.Bool("vv", false, "显示指纹匹配规则与内容片段 (默认关闭，可使用 -vv 开启)")
 		noColor      = flag.Bool("no-color", false, "禁用彩色输出，适用于控制台不支持ANSI的环境")
-		networkCheck = flag.Bool("nc", false, "启用存活性检测 (默认关闭)")
+		networkCheck = flag.Bool("check-alive", false, "启用存活性检测 (默认关闭)")
 		jsonOutput   = flag.Bool("json", false, "使用JSON格式输出扫描结果，便于与其他工具集成")
 
 		// 新增：状态码过滤参数
@@ -339,8 +337,8 @@ veo - 端口扫描/指纹识别/目录扫描
   --stats              显示实时统计信息
   -v                   显示指纹匹配规则内容
   -vv                  显示指纹匹配规则及匹配片段
-  -nc                  启用存活性检测 (默认关闭)
-  -no-color            禁用彩色输出
+  --check-alive        启用存活性检测 (默认关闭)
+  --no-color           禁用彩色输出
   --json               控制台输出 JSON
   -ua bool             是否启用随机User-Agent 池 (默认 true，使用 -ua=false 关闭)
 
@@ -351,12 +349,14 @@ veo - 端口扫描/指纹识别/目录扫描
 
 目录扫描:
   -w string            指定自定义目录字典，可用逗号添加多个
+  --depth int          递归目录扫描深度 (0 表示关闭递归，默认: 0)
+  --no-filter          完全禁用目录扫描哈希过滤（默认开启）
 
 输出与过滤:
   -o, --output string  写入报告文件 (.json / .xlsx)
   --header string      自定义 HTTP 头部，可重复指定
   -s string            保留的 HTTP 状态码列表
-  --filter int         相似页面过滤阈值（字节，0 表示关闭）
+  --update-rules       从云端更新指纹识别规则库
 
 帮助:
   -h, --help           显示本帮助信息
@@ -983,20 +983,55 @@ func startApplication(args *CLIArgs) error {
 
 	// 执行模块间依赖注入
 	if app.fingerprintAddon != nil {
-		// 使用HTTP客户端工厂创建客户端（代码质量优化）
-		userAgent := "Moziilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0"
-
-		// 获取并更新客户端配置
-		clientConfig := httpclient.DefaultConfigWithUserAgent(userAgent)
+		// [优化] 使用 RequestProcessor 创建统一配置的 HTTP 客户端
+		// 这确保被动扫描中的主动探测逻辑（超时、重试、并发）与主动模式一致
+		
+		// 1. 获取全局请求配置（已应用CLI参数）
+		globalReqConfig := config.GetRequestConfig()
+		
+		// 2. 转换为 processor.RequestConfig
+		// 注意：config包和processor包的RequestConfig结构体不同，需要手动映射
+		procConfig := requests.GetDefaultConfig()
+		
+		if globalReqConfig != nil {
+			if globalReqConfig.Timeout > 0 {
+				procConfig.Timeout = time.Duration(globalReqConfig.Timeout) * time.Second
+			}
+			if globalReqConfig.Retry > 0 {
+				procConfig.MaxRetries = globalReqConfig.Retry
+			}
+			if globalReqConfig.Threads > 0 {
+				procConfig.MaxConcurrent = globalReqConfig.Threads
+			}
+			if globalReqConfig.RandomUA != nil {
+				procConfig.RandomUserAgent = *globalReqConfig.RandomUA
+			}
+		}
+		
+		// 3. 始终应用上游代理（如果配置了）
 		if proxyCfg := config.GetProxyConfig(); proxyCfg.UpstreamProxy != "" {
-			clientConfig.ProxyURL = proxyCfg.UpstreamProxy
+			procConfig.ProxyURL = proxyCfg.UpstreamProxy
 		}
 
-		httpClient := httpclient.New(clientConfig)
+		// 4. 创建 RequestProcessor
+		requestProcessor := requests.NewRequestProcessor(procConfig)
+		// 设置模块上下文
+		requestProcessor.SetModuleContext("fingerprint-passive")
 
-		// 注入到指纹识别模块
+		// 5. 使用适配器转换为 HTTPClientInterface
+		httpClient := newRequestProcessorHTTPClient(requestProcessor)
+
+		// 6. 注入到指纹识别模块
 		app.fingerprintAddon.SetHTTPClient(httpClient)
-		logger.Debug("HTTP客户端已注入到指纹识别模块")
+		
+		// 7. 设置主动探测的超时时间 (从配置中获取)
+		if procConfig.Timeout > 0 {
+			// 使用 RequestProcessor 配置中的超时
+			app.fingerprintAddon.SetTimeout(procConfig.Timeout)
+			logger.Debugf("指纹插件主动探测超时已设置为: %v", procConfig.Timeout)
+		}
+		
+		logger.Debug("统一的RequestProcessor客户端已注入到指纹识别模块")
 	}
 
 	logger.Debug("模块启动和依赖注入完成")

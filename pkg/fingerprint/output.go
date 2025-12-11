@@ -1,3 +1,4 @@
+
 package fingerprint
 
 import (
@@ -224,9 +225,9 @@ func (f *NullOutputFormatter) ShouldOutput(url string, fingerprintNames []string
 // 用于在不修改Engine构造函数的情况下设置输出器
 var globalOutputFormatter OutputFormatter
 
-// SetGlobalOutputFormatter 设置全局输出格式化器
-func SetGlobalOutputFormatter(formatter OutputFormatter) {
-	globalOutputFormatter = formatter
+// SetShowRules 动态控制规则显示
+func (f *ConsoleOutputFormatter) SetShowRules(enabled bool) {
+	f.showRules = enabled
 }
 
 // GetGlobalOutputFormatter 获取全局输出格式化器
@@ -234,20 +235,6 @@ func GetGlobalOutputFormatter() OutputFormatter {
 	return globalOutputFormatter
 }
 
-// SetConsoleSnippetEnabled 动态控制snippet输出(用于运行时配置)
-func (f *ConsoleOutputFormatter) SetConsoleSnippetEnabled(enabled bool) {
-	f.consoleSnippetEnabled = enabled
-}
-
-// SetShowRules 动态控制规则显示
-func (f *ConsoleOutputFormatter) SetShowRules(enabled bool) {
-	f.showRules = enabled
-}
-
-// SetShowSnippet 动态控制snippet捕获
-func (f *ConsoleOutputFormatter) SetShowSnippet(enabled bool) {
-	f.showSnippet = enabled
-}
 
 // GetOutputStats 获取输出统计信息
 func (f *ConsoleOutputFormatter) GetOutputStats() map[string]interface{} {

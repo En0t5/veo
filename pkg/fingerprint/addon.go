@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"veo/pkg/dirscan"
 	"veo/pkg/utils/httpclient"
@@ -26,6 +27,7 @@ type FingerprintAddon struct {
 	encodingDetector *EncodingDetector              // 编码检测器
 	allowedHosts     []string                       // 允许的主机列表
 	customHeaders    map[string]string              // 自定义HTTP头部
+	timeout          time.Duration                  // 主动探测超时时间
 }
 
 // NewFingerprintAddon 创建指纹识别插件
@@ -44,6 +46,7 @@ func NewFingerprintAddon(engineConfig *EngineConfig) (*FingerprintAddon, error) 
 		httpClient:       nil,                   // HTTP客户端需要后续设置
 		probedHosts:      make(map[string]bool), // 初始化探测缓存
 		encodingDetector: GetEncodingDetector(), // 初始化编码检测器
+		timeout:          5 * time.Minute,       // 默认超时
 	}
 
 	return addon, nil
@@ -140,7 +143,7 @@ func (fa *FingerprintAddon) Response(f *proxy.Flow) {
 		if shouldProbe && fa.shouldTriggerActiveProbing(hostKey) {
 			logger.Debugf("触发主动探测: %s", hostKey)
 			fa.markHostAsProbed(hostKey) // 标记为已探测，避免重复
-			fa.engine.TriggerActiveProbing(fa.getBaseURL(response.URL), fa.httpClient)
+			fa.engine.TriggerActiveProbing(fa.getBaseURL(response.URL), fa.httpClient, fa.timeout)
 		}
 	}
 
@@ -252,7 +255,10 @@ func (fa *FingerprintAddon) EnableSnippet(enabled bool) {
 // EnableRuleLogging 控制是否输出匹配规则内容
 func (fa *FingerprintAddon) EnableRuleLogging(enabled bool) {
 	if fa.engine != nil {
-		fa.engine.EnableRuleLogging(enabled)
+		// 直接通过OutputFormatter控制
+		if formatter, ok := fa.engine.GetOutputFormatter().(*ConsoleOutputFormatter); ok {
+			formatter.SetShowRules(enabled)
+		}
 	}
 }
 
@@ -361,6 +367,13 @@ func CreateDefaultAddon() (*FingerprintAddon, error) {
 // SetAllowedHosts 设置允许的主机列表
 func (fa *FingerprintAddon) SetAllowedHosts(hosts []string) {
 	fa.allowedHosts = hosts
+}
+
+// SetTimeout 设置主动探测超时时间
+func (fa *FingerprintAddon) SetTimeout(timeout time.Duration) {
+	if timeout > 0 {
+		fa.timeout = timeout
+	}
 }
 
 // SetCustomHeaders 设置自定义HTTP头部

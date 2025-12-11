@@ -82,25 +82,6 @@ func (e *Engine) EnableSnippet(enabled bool) {
 	e.mu.Unlock()
 }
 
-// EnableRuleLogging 控制是否输出匹配规则内容(已废弃,由OutputFormatter控制)
-// 保留此方法以保持向后兼容
-func (e *Engine) EnableRuleLogging(enabled bool) {
-	e.mu.Lock()
-	if formatter, ok := e.outputFormatter.(*ConsoleOutputFormatter); ok {
-		formatter.SetShowRules(enabled)
-	}
-	e.mu.Unlock()
-}
-
-// EnableConsoleSnippet 控制是否在控制台输出指纹匹配片段(已废弃,由OutputFormatter控制)
-// 保留此方法以保持向后兼容
-func (e *Engine) EnableConsoleSnippet(enabled bool) {
-	e.mu.Lock()
-	if formatter, ok := e.outputFormatter.(*ConsoleOutputFormatter); ok {
-		formatter.SetConsoleSnippetEnabled(enabled)
-	}
-	e.mu.Unlock()
-}
 
 // IsSnippetEnabled 返回是否启用指纹匹配片段捕获
 func (e *Engine) IsSnippetEnabled() bool {
@@ -154,6 +135,24 @@ func (e *Engine) AnalyzeResponse(response *HTTPResponse) []*FingerprintMatch {
 
 // AnalyzeResponseWithClient 分析响应包并进行指纹识别（增强版，支持icon()函数主动探测）
 func (e *Engine) AnalyzeResponseWithClient(response *HTTPResponse, httpClient httpclient.HTTPClientInterface) []*FingerprintMatch {
+	return e.analyzeResponseInternal(response, httpClient, false)
+}
+
+// AnalyzeResponseWithClientSilent 分析响应包并进行指纹识别（静默版本，不自动输出结果）
+// 专用于404页面等需要自定义输出格式的场景
+func (e *Engine) AnalyzeResponseWithClientSilent(response *HTTPResponse, httpClient interface{}) []*FingerprintMatch {
+	// 类型适配：尝试转换为 HTTPClientInterface
+	var client httpclient.HTTPClientInterface
+	if httpClient != nil {
+		if c, ok := httpClient.(httpclient.HTTPClientInterface); ok {
+			client = c
+		}
+	}
+	return e.analyzeResponseInternal(response, client, true)
+}
+
+// analyzeResponseInternal 内部核心分析逻辑（DRY Refactoring）
+func (e *Engine) analyzeResponseInternal(response *HTTPResponse, httpClient httpclient.HTTPClientInterface, silent bool) []*FingerprintMatch {
 	// 检查是否应该过滤此响应
 	if e.config.EnableFiltering && e.shouldFilterResponse(response) {
 		atomic.AddInt64(&e.stats.FilteredRequests, 1)
@@ -163,23 +162,23 @@ func (e *Engine) AnalyzeResponseWithClient(response *HTTPResponse, httpClient ht
 	// 更新统计
 	atomic.AddInt64(&e.stats.TotalRequests, 1)
 
-	// 性能优化：移除信号量控制，统一在RequestProcessor层管理并发
-	// 指纹匹配本身是CPU密集型操作，不需要额外的并发限制
-	// HTTP请求的并发控制已在RequestProcessor层实现
-
 	// 创建DSL上下文（支持主动探测）
 	var ctx *DSLContext
-	if httpClient != nil {
-		// 从响应URL中提取基础URL
-		baseURL := ""
+	
+	// 从响应URL中提取基础URL (Shared logic)
+	baseURL := ""
+	if response != nil && response.URL != "" {
 		if parsedURL, err := url.Parse(response.URL); err == nil {
 			baseURL = fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
 		}
+	}
+	
+	if httpClient != nil {
 		ctx = e.createDSLContextWithClient(response, httpClient, baseURL)
-		logger.Debugf("创建增强DSL上下文，支持icon()主动探测: %s (HTTPClient: %v)", baseURL, httpClient != nil)
+		logger.Debugf("创建增强DSL上下文，支持icon()主动探测: %s (Silent: %v)", baseURL, silent)
 	} else {
 		ctx = e.createDSLContext(response)
-		logger.Debugf("创建基础DSL上下文，不支持icon()主动探测")
+		logger.Debugf("创建基础DSL上下文，不支持icon()主动探测 (Silent: %v)", silent)
 	}
 
 	var matches []*FingerprintMatch
@@ -201,93 +200,44 @@ func (e *Engine) AnalyzeResponseWithClient(response *HTTPResponse, httpClient ht
 		e.stats.LastMatchTime = time.Now()
 		e.matches = append(e.matches, matches...)
 		e.mu.Unlock()
-	}
 
-	// 使用OutputFormatter输出结果
-	if e.outputFormatter != nil {
-		if len(matches) > 0 {
-			e.outputFormatter.FormatMatch(matches, response)
+		// 输出逻辑
+		if !silent {
+			if e.outputFormatter != nil {
+				e.outputFormatter.FormatMatch(matches, response)
+			}
 		} else {
+			// [关键] 静默模式：不调用 outputFingerprintMatches，由调用方负责输出
+			logger.Debugf("静默模式匹配完成，匹配数量: %d，跳过自动输出", len(matches))
+		}
+	} else {
+		// No match output (only if not silent)
+		if !silent && e.outputFormatter != nil {
 			e.outputFormatter.FormatNoMatch(response)
 		}
 	}
 
-	if fetcher, ok := httpClient.(redirect.HTTPFetcher); ok {
-		if redirected, err := redirect.FollowClientRedirect(response, fetcher); err == nil && redirected != nil {
-			rMatches := e.AnalyzeResponseWithClientSilent(redirected, httpClient)
-			if len(rMatches) > 0 {
-				// 使用OutputFormatter输出重定向结果
-				if e.outputFormatter != nil {
-					e.outputFormatter.FormatMatch(rMatches, redirected)
-				}
-				matches = append(matches, rMatches...)
-			}
-		} else if err != nil {
-			logger.Debugf("客户端重定向抓取失败: %v", err)
-		}
-	}
-
-	return matches
-}
-
-
-// AnalyzeResponseWithClientSilent 分析响应包并进行指纹识别（静默版本，不自动输出结果）
-// 专用于404页面等需要自定义输出格式的场景
-func (e *Engine) AnalyzeResponseWithClientSilent(response *HTTPResponse, httpClient interface{}) []*FingerprintMatch {
-	// 类型适配：尝试转换为 HTTPClientInterface
-	var client httpclient.HTTPClientInterface
+	// 客户端重定向处理 (仅当提供了httpClient时)
 	if httpClient != nil {
-		if c, ok := httpClient.(httpclient.HTTPClientInterface); ok {
-			client = c
+		if fetcher, ok := httpClient.(redirect.HTTPFetcher); ok {
+			if redirected, err := redirect.FollowClientRedirect(response, fetcher); err == nil && redirected != nil {
+				// 递归调用 Silent 版本，避免重复统计（或避免重复输出？不，这里明确是Silent）
+				// 原逻辑：rMatches := e.AnalyzeResponseWithClientSilent(redirected, httpClient)
+				// 并手动输出
+				
+				rMatches := e.analyzeResponseInternal(redirected, httpClient, true)
+				
+				if len(rMatches) > 0 {
+					// 如果主调用不是 silent，则手动输出重定向结果
+					if !silent && e.outputFormatter != nil {
+						e.outputFormatter.FormatMatch(rMatches, redirected)
+					}
+					matches = append(matches, rMatches...)
+				}
+			} else if err != nil {
+				logger.Debugf("客户端重定向抓取失败: %v", err)
+			}
 		}
-	}
-
-	// 检查是否应该过滤此响应
-	if e.config.EnableFiltering && e.shouldFilterResponse(response) {
-		atomic.AddInt64(&e.stats.FilteredRequests, 1)
-		return nil
-	}
-
-	// 更新统计
-	atomic.AddInt64(&e.stats.TotalRequests, 1)
-
-	// 创建DSL上下文（支持主动探测）
-	var ctx *DSLContext
-	if client != nil {
-		// 从响应URL中提取基础URL
-		baseURL := ""
-		if parsedURL, err := url.Parse(response.URL); err == nil {
-			baseURL = fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
-		}
-		ctx = e.createDSLContextWithClient(response, client, baseURL)
-		logger.Debugf("创建增强DSL上下文（静默模式），支持icon()主动探测: %s (HTTPClient: %v)", baseURL, client != nil)
-	} else {
-		ctx = e.createDSLContext(response)
-		logger.Debugf("创建基础DSL上下文（静默模式），不支持icon()主动探测")
-	}
-
-	var matches []*FingerprintMatch
-
-	// 遍历所有规则进行匹配
-	// 性能优化：使用预计算的规则快照
-	rules := e.ruleManager.GetRulesSnapshot()
-
-	for _, rule := range rules {
-		if match := e.matchRule(rule, ctx); match != nil {
-			matches = append(matches, match)
-		}
-	}
-
-	// 更新匹配统计但不输出日志（静默模式）
-	if len(matches) > 0 {
-		atomic.AddInt64(&e.stats.MatchedRequests, 1)
-		e.mu.Lock()
-		e.stats.LastMatchTime = time.Now()
-		e.matches = append(e.matches, matches...)
-		e.mu.Unlock()
-
-		// [关键] 静默模式：不调用 outputFingerprintMatches，由调用方负责输出
-		logger.Debugf("静默模式匹配完成，匹配数量: %d，跳过自动输出", len(matches))
 	}
 
 	return matches
@@ -566,21 +516,23 @@ func (e *Engine) getIconHash(iconURL string, httpClient httpclient.HTTPClientInt
 // 主动探测相关方法
 
 // TriggerActiveProbing 触发主动探测（异步，用于被动模式）
-func (e *Engine) TriggerActiveProbing(baseURL string, httpClient httpclient.HTTPClientInterface) {
+func (e *Engine) TriggerActiveProbing(baseURL string, httpClient httpclient.HTTPClientInterface, timeout time.Duration) {
 	if httpClient == nil {
 		return
 	}
 	go func() {
-		// 使用默认超时
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		// 使用配置的超时
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		// 执行主动Path探测
 		_, _ = e.ExecuteActiveProbing(ctx, baseURL, httpClient)
 		
-		// 执行404探测
-		ctx404, cancel404 := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel404()
-		_, _ = e.Execute404Probing(ctx404, baseURL, httpClient)
+		// 执行404探测 (使用总超时的一部分或剩余时间，这里简化为总超时)
+		// 实际上 Execute404Probing 很快，可以共享同一个 context
+		_, _ = e.Execute404Probing(ctx, baseURL, httpClient)
 	}()
 }
 
@@ -599,13 +551,10 @@ func (e *Engine) ExecuteActiveProbing(ctx context.Context, baseURL string, httpC
 		return nil, nil
 	}
 
-	// 解析baseURL
-	parsedURL, err := url.Parse(baseURL)
-	if err != nil {
+	// 验证baseURL格式
+	if _, err := url.Parse(baseURL); err != nil {
 		return nil, fmt.Errorf("URL解析失败: %v", err)
 	}
-	scheme := parsedURL.Scheme
-	host := parsedURL.Host
 
 	var results []*ProbeResult
 	var resultsMu sync.Mutex
@@ -656,7 +605,7 @@ func (e *Engine) ExecuteActiveProbing(ctx context.Context, baseURL string, httpC
 						return
 					}
 					
-					probeURL := buildProbeURLFromParts(scheme, host, tk.path)
+					probeURL := joinURLPath(baseURL, tk.path)
 					
 					// 构造Headers
 					var headers map[string]string
@@ -787,18 +736,23 @@ func makeRequestWithOptionalHeaders(httpClient httpclient.HTTPClientInterface, t
 	return httpClient.MakeRequest(targetURL)
 }
 
-func buildProbeURLFromParts(scheme, host, path string) string {
+func joinURLPath(baseURL, path string) string {
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		return path
 	}
-	trimmed := path
-	if trimmed == "" {
-		trimmed = "/"
+
+	base := strings.TrimRight(baseURL, "/")
+	// 如果path为空，或者只包含斜杠，处理一下
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return base + "/"
 	}
-	if !strings.HasPrefix(trimmed, "/") {
-		trimmed = "/" + trimmed
+
+	if !strings.HasPrefix(cleanPath, "/") {
+		cleanPath = "/" + cleanPath
 	}
-	return fmt.Sprintf("%s://%s%s", scheme, host, trimmed)
+
+	return base + cleanPath
 }
 
 // HasPathRules 检查是否有包含path字段的规则

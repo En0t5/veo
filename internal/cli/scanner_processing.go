@@ -318,6 +318,22 @@ func (sc *ScanController) extractBaseURL(rawURL string) string {
 	return rawURL
 }
 
+// extractBaseURLWithPath 从完整URL中提取基础URL（协议+主机+路径），去除查询参数和片段
+func (sc *ScanController) extractBaseURLWithPath(rawURL string) string {
+	if parsedURL, err := url.Parse(rawURL); err == nil {
+		path := parsedURL.Path
+		// 移除末尾的斜杠，保证一致性，除非路径就是根目录
+		if path != "/" {
+			path = strings.TrimRight(path, "/")
+		}
+		if path == "" {
+			path = "/" // 理论上Parse不会返回空path如果只是host，但为了保险
+		}
+		return fmt.Sprintf("%s://%s%s", parsedURL.Scheme, parsedURL.Host, path)
+	}
+	return rawURL
+}
+
 // extractHostKey 提取主机键（用于探测缓存）
 func (sc *ScanController) extractHostKey(rawURL string) string {
 	if parsedURL, err := url.Parse(rawURL); err == nil {

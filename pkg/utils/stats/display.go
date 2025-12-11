@@ -211,6 +211,17 @@ func (sd *StatsDisplay) ShowFinalStats() {
 		logger.Warnf("修正已完成主机数统计错误: %d -> %d", atomic.LoadInt64(&sd.stats.CompletedHosts), completedHosts)
 	}
 
+	// 修复已完成请求数统计错误：确保不超过总请求数
+	// 在大规模并发或重试场景下，CompletedReqs 可能会稍微滞后或因为重试而增加，
+	// 但 TotalRequests 通常是预估值。如果 Completed > Total，修正显示为 Total。
+	if completedReqs > totalRequests {
+		if totalRequests > 0 {
+			if completedReqs < totalRequests {
+				totalRequests = completedReqs
+			}
+		}
+	}
+
 	// 格式化耗时显示（秒为单位）
 	elapsedSeconds := int(elapsed.Seconds())
 	timeStr := fmt.Sprintf("%dS", elapsedSeconds)

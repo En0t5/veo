@@ -1,6 +1,7 @@
 package dirscan
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -202,6 +203,7 @@ func (da *DirscanAddon) TriggerScan() (*ScanResult, error) {
 	// 执行递归扫描
 	// 注意：RunRecursiveScan 的返回值我们在这里可以忽略，因为我们在闭包里收集了完整结果
 	_, err := RunRecursiveScan(
+		context.Background(),
 		collectedURLs,
 		depth,
 		layerScanner,
