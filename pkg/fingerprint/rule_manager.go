@@ -193,6 +193,19 @@ func (rm *RuleManager) GetHeaderRules() []*FingerprintRule {
 	return headerRules
 }
 
+// GetPathRulesCount 获取 path 规则数量
+func (rm *RuleManager) GetPathRulesCount() int {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	count := 0
+	for _, rule := range rm.rules {
+		if rule != nil {
+			count += len(rule.Paths)
+		}
+	}
+	return count
+}
+
 // HasPathRules 检查是否有 path 规则
 func (rm *RuleManager) HasPathRules() bool {
 	rm.mu.RLock()
@@ -205,15 +218,21 @@ func (rm *RuleManager) HasPathRules() bool {
 	return false
 }
 
-// GetPathRulesCount 获取 path 规则数量
-func (rm *RuleManager) GetPathRulesCount() int {
+// GetIconRules 获取所有包含 icon() 函数的规则
+func (rm *RuleManager) GetIconRules() []*FingerprintRule {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	count := 0
+
+	var iconRules []*FingerprintRule
 	for _, rule := range rm.rules {
 		if rule != nil {
-			count += len(rule.Paths)
+			for _, dsl := range rule.DSL {
+				if strings.Contains(dsl, "icon(") {
+					iconRules = append(iconRules, rule)
+					break
+				}
+			}
 		}
 	}
-	return count
+	return iconRules
 }

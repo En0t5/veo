@@ -39,15 +39,15 @@ type FingerprintMatch struct {
 
 // FilterResult represents the result of response filtering.
 type FilterResult struct {
-	StatusFilteredPages  []HTTPResponse `json:"status_filtered_pages"`
-	PrimaryFilteredPages []HTTPResponse `json:"primary_filtered_pages"`
-	ValidPages           []HTTPResponse `json:"valid_pages"`
-	InvalidPageHashes    []PageHash     `json:"invalid_page_hashes"`
-	SecondaryHashResults []PageHash     `json:"secondary_hash_results"`
-	TotalProcessed       int            `json:"total_processed"`
-	StatusFiltered       int            `json:"status_filtered"`
-	PrimaryFiltered      int            `json:"primary_filtered"`
-	SecondaryFiltered    int            `json:"secondary_filtered"`
+	StatusFilteredPages  []*HTTPResponse `json:"status_filtered_pages"`
+	PrimaryFilteredPages []*HTTPResponse `json:"primary_filtered_pages"`
+	ValidPages           []*HTTPResponse `json:"valid_pages"`
+	InvalidPageHashes    []PageHash      `json:"invalid_page_hashes"`
+	SecondaryHashResults []PageHash      `json:"secondary_hash_results"`
+	TotalProcessed       int             `json:"total_processed"`
+	StatusFiltered       int             `json:"status_filtered"`
+	PrimaryFiltered      int             `json:"primary_filtered"`
+	SecondaryFiltered    int             `json:"secondary_filtered"`
 }
 
 // PageHash represents hash information for a page.

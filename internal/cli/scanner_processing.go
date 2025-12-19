@@ -17,7 +17,7 @@ import (
 	sharedutils "veo/pkg/utils/shared"
 )
 
-func (sc *ScanController) applyFilterForTarget(responses []interfaces.HTTPResponse, target string, externalFilter *dirscan.ResponseFilter) (*interfaces.FilterResult, error) {
+func (sc *ScanController) applyFilterForTarget(responses []*interfaces.HTTPResponse, target string, externalFilter *dirscan.ResponseFilter) (*interfaces.FilterResult, error) {
 	logger.Debugf("开始对目标 %s 应用过滤器，响应数量: %d (外部过滤器: %v)", target, len(responses), externalFilter != nil)
 
 	var responseFilter *dirscan.ResponseFilter
@@ -35,16 +35,14 @@ func (sc *ScanController) applyFilterForTarget(responses []interfaces.HTTPRespon
 		responseFilter, exists = sc.siteFilters[targetKey]
 		if !exists {
 			responseFilter = dirscan.CreateResponseFilterFromExternal()
-			responseFilter.EnableFingerprintSnippet(sc.showFingerprintSnippet)
-			responseFilter.EnableFingerprintRuleDisplay(sc.showFingerprintRule)
 
 			if sc.fingerprintEngine != nil {
 				responseFilter.SetFingerprintEngine(sc.fingerprintEngine)
 				logger.Debugf("目录扫描模块已启用指纹二次识别功能，引擎类型: %T", sc.fingerprintEngine)
 				
-				// [修复] 注入 HTTP 客户端以支持 icon() 等主动探测功能
-				// 这里使用的是扫描控制器的全局 RequestProcessor
-				responseFilter.SetHTTPClient(sc.requestProcessor)
+				// [取消] 二次指纹识别无需主动探测（icon和404）
+				// 仅保留被动页面识别，避免重复发包
+				// responseFilter.SetHTTPClient(sc.requestProcessor)
 			} else {
 				logger.Debugf("指纹引擎为nil，未启用二次识别")
 			}
@@ -64,7 +62,7 @@ func (sc *ScanController) applyFilterForTarget(responses []interfaces.HTTPRespon
 
 	// [去重] 全局结果去重，只显示未显示过的URL
 	sc.displayedURLsMu.Lock()
-	var uniqueValidPages []interfaces.HTTPResponse
+	var uniqueValidPages []*interfaces.HTTPResponse
 	for _, page := range filterResult.ValidPages {
 		if !sc.displayedURLs[page.URL] {
 			sc.displayedURLs[page.URL] = true
@@ -76,7 +74,8 @@ func (sc *ScanController) applyFilterForTarget(responses []interfaces.HTTPRespon
 
 	// 显示单个目标的过滤结果（现在会包含指纹信息）
 	logger.Debugf("目标 %s 过滤完成:", target)
-	responseFilter.PrintFilterResult(filterResult)
+	// [重构] 打印逻辑移出，这里不再直接打印，但为了调试信息，可以保留简单的 count 输出
+	// responseFilter.PrintFilterResult(filterResult)
 
 	logger.Debugf("目标 %s 过滤完成 - 原始响应: %d, 有效结果: %d",
 		target, len(responses), len(filterResult.ValidPages))
@@ -85,48 +84,31 @@ func (sc *ScanController) applyFilterForTarget(responses []interfaces.HTTPRespon
 }
 
 // processTargetResponses 处理目标响应：类型转换、应用过滤器、收集统计
-func (sc *ScanController) processTargetResponses(ctx context.Context, responses []*interfaces.HTTPResponse, target string, filter *dirscan.ResponseFilter) ([]interfaces.HTTPResponse, error) {
-	// 转换为接口类型
-	var targetResponses []interfaces.HTTPResponse
-	for _, resp := range responses {
-		httpResp := interfaces.HTTPResponse{
-			URL:             resp.URL,
-			StatusCode:      resp.StatusCode,
-			ContentLength:   resp.ContentLength,
-			ContentType:     resp.ContentType,
-			Body:            resp.ResponseBody,
-			ResponseHeaders: resp.ResponseHeaders,
-			RequestHeaders:  resp.RequestHeaders,
-			ResponseBody:    resp.ResponseBody,
-			Title:           resp.Title,
-			Server:          resp.Server,
-			Duration:        resp.Duration,
-			IsDirectory:     strings.HasSuffix(resp.URL, "/"),
-		}
-		targetResponses = append(targetResponses, httpResp)
-	}
-
-	if len(targetResponses) == 0 {
+func (sc *ScanController) processTargetResponses(ctx context.Context, responses []*interfaces.HTTPResponse, target string, filter *dirscan.ResponseFilter) ([]*interfaces.HTTPResponse, error) {
+	if len(responses) == 0 {
 		return nil, nil
 	}
 
-	// 应用过滤器
-	filterResult, err := sc.applyFilterForTarget(targetResponses, target, filter)
+	// 应用过滤器 (直接使用指针切片)
+	filterResult, err := sc.applyFilterForTarget(responses, target, filter)
 	if err != nil {
 		logger.Errorf("目标 %s 过滤器应用失败: %v", target, err)
 		// 如果过滤失败，返回原始结果（Fail Open）
-		return targetResponses, err
+		return responses, err
 	}
 
 	// 收集被过滤的页面用于报告
 	sc.collectedResultsMu.Lock()
-	sc.collectedPrimaryFiltered = append(sc.collectedPrimaryFiltered, filterResult.PrimaryFilteredPages...)
-	sc.collectedStatusFiltered = append(sc.collectedStatusFiltered, filterResult.StatusFilteredPages...)
+	sc.collectedPrimaryFiltered = append(sc.collectedPrimaryFiltered, toValueSlice(filterResult.PrimaryFilteredPages)...)
+	sc.collectedStatusFiltered = append(sc.collectedStatusFiltered, toValueSlice(filterResult.StatusFilteredPages)...)
 	sc.collectedResultsMu.Unlock()
 
 	// 返回有效结果
+	// 注意：之前这里直接返回 ValidPages，但调用方 (如 passive scan) 可能期望 []interfaces.HTTPResponse
+	// 但 processTargetResponses 签名已改为返回 []*interfaces.HTTPResponse，所以直接返回
 	return filterResult.ValidPages, nil
 }
+
 
 func (sc *ScanController) buildScanParams() map[string]interface{} {
 	params := map[string]interface{}{
@@ -204,7 +186,7 @@ func (sc *ScanController) generateConsoleJSON(dirPages, fingerprintPages []inter
 	}
 
 	if len(fingerprintPages) == 0 && sc.args.HasModule(string(modulepkg.ModuleFinger)) {
-		fingerprintPages = filterResult.ValidPages
+		fingerprintPages = toValueSlice(filterResult.ValidPages)
 	}
 
 	params := sc.buildScanParams()

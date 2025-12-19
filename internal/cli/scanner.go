@@ -21,6 +21,17 @@ import (
 	"veo/pkg/utils/stats"
 )
 
+// toValueSlice 将指针切片转换为值切片
+func toValueSlice(pages []*interfaces.HTTPResponse) []interfaces.HTTPResponse {
+	result := make([]interfaces.HTTPResponse, 0, len(pages))
+	for _, p := range pages {
+		if p != nil {
+			result = append(result, *p)
+		}
+	}
+	return result
+}
+
 // toReporterStats 和 convertFingerprintMatches 已移动到 report.go 以实现共享
 
 // ScanMode 扫描模式
@@ -33,20 +44,20 @@ const (
 
 // ScanController 扫描控制器
 type ScanController struct {
-	mode                   ScanMode
-	args                   *CLIArgs
-	config                 *config.Config
-	requestProcessor       *requests.RequestProcessor
-	urlGenerator           *dirscan.URLGenerator
-	fingerprintEngine      *fingerprint.Engine           // 指纹识别引擎
-	encodingDetector       *fingerprint.EncodingDetector // 编码检测器
-	probedHosts            map[string]bool               // 已探测的主机缓存（用于path探测去重）
-	probedMutex            sync.RWMutex                  // 探测缓存锁
+	mode              ScanMode
+	args              *CLIArgs
+	config            *config.Config
+	requestProcessor  *requests.RequestProcessor
+	urlGenerator      *dirscan.URLGenerator
+	fingerprintEngine *fingerprint.Engine           // 指纹识别引擎
+	encodingDetector  *fingerprint.EncodingDetector // 编码检测器
+	probedHosts       map[string]bool               // 已探测的主机缓存（用于path探测去重）
+	probedMutex       sync.RWMutex                  // 探测缓存锁
 	// progressTracker        *FingerprintProgressTracker   // 已移除：统一使用StatsDisplay
-	statsDisplay           *stats.StatsDisplay           // 统计显示器
-	lastTargets            []string                      // 最近解析的目标列表
-	showFingerprintSnippet bool                          // 是否展示指纹匹配内容
-	showFingerprintRule    bool                          // 是否展示指纹匹配规则
+	statsDisplay           *stats.StatsDisplay // 统计显示器
+	lastTargets            []string            // 最近解析的目标列表
+	showFingerprintSnippet bool                // 是否展示指纹匹配内容
+	showFingerprintRule    bool                // 是否展示指纹匹配规则
 	maxConcurrent          int
 	retryCount             int
 	timeoutSeconds         int
@@ -206,7 +217,7 @@ func (sc *ScanController) runActiveMode() error {
 	logger.Debug("启动主动扫描模式")
 	targets, err := sc.parseTargets(sc.args.Targets)
 	if err != nil {
-		return fmt.Errorf("目标解析失败: %v", err)
+		return fmt.Errorf("Target Parse Error: %v", err)
 	}
 
 	sc.lastTargets = targets
@@ -215,7 +226,7 @@ func (sc *ScanController) runActiveMode() error {
 
 	// 打印有效性筛选结果
 	if !sc.args.JSONOutput {
-		logger.Infof("经有效性筛选，有效Host数量: %d", len(targets))
+		logger.Infof("Available Hosts: %d", len(targets))
 	}
 
 	if sc.statsDisplay.IsEnabled() {
@@ -320,7 +331,6 @@ func (sc *ScanController) GetRequestProcessor() *requests.RequestProcessor {
 	return sc.requestProcessor
 }
 
-
 func (sc *ScanController) finalizeScan(allResults, dirResults, fingerprintResults []interfaces.HTTPResponse) error {
 	logger.Debugf("所有模块执行完成，总结果数: %d", len(allResults))
 
@@ -332,14 +342,36 @@ func (sc *ScanController) finalizeScan(allResults, dirResults, fingerprintResult
 		if len(pages) == 0 {
 			pages = allResults
 		}
+		// Convert value slice to pointer slice for FilterResult
+		validPages := make([]*interfaces.HTTPResponse, len(pages))
+		for i := range pages {
+			validPages[i] = &pages[i]
+		}
+
 		filterResult = &interfaces.FilterResult{
-			ValidPages: pages,
+			ValidPages: validPages,
 		}
 	} else {
+		// Convert value slices to pointer slices
+		validPages := make([]*interfaces.HTTPResponse, len(allResults))
+		for i := range allResults {
+			validPages[i] = &allResults[i]
+		}
+
+		primaryFiltered := make([]*interfaces.HTTPResponse, len(sc.collectedPrimaryFiltered))
+		for i := range sc.collectedPrimaryFiltered {
+			primaryFiltered[i] = &sc.collectedPrimaryFiltered[i]
+		}
+
+		statusFiltered := make([]*interfaces.HTTPResponse, len(sc.collectedStatusFiltered))
+		for i := range sc.collectedStatusFiltered {
+			statusFiltered[i] = &sc.collectedStatusFiltered[i]
+		}
+
 		filterResult = &interfaces.FilterResult{
-			ValidPages:           allResults,
-			PrimaryFilteredPages: sc.collectedPrimaryFiltered,
-			StatusFilteredPages:  sc.collectedStatusFiltered,
+			ValidPages:           validPages,
+			PrimaryFilteredPages: primaryFiltered,
+			StatusFilteredPages:  statusFiltered,
 		}
 		logger.Debugf("构造FilterResult - ValidPages: %d, PrimaryFiltered: %d, StatusFiltered: %d",
 			len(allResults), len(sc.collectedPrimaryFiltered), len(sc.collectedStatusFiltered))
@@ -393,7 +425,6 @@ func (sc *ScanController) getOptimizedModuleOrder() []string {
 
 	return orderedModules
 }
-
 
 func (sc *ScanController) runModuleForTargetsWithContext(ctx context.Context, moduleName string, targets []string) ([]interfaces.HTTPResponse, error) {
 	// 简单的包装，未来应该修改 runDirscanModule 和 runFingerprintModule 以接受 Context

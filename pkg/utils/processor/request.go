@@ -370,11 +370,11 @@ func (rp *RequestProcessor) prepareRequest(req *fasthttp.Request, rawURL string)
 // logRequestError 记录请求错误日志
 func (rp *RequestProcessor) logRequestError(rawURL string, err error) {
 	if rp.isTimeoutOrCanceledError(err) {
-		logger.Debugf("超时丢弃URL: %s, 耗时: >%v, 错误: %v", rawURL, rp.config.Timeout, err)
+		logger.Debugf("请求超时: %s, 耗时: >%v, 错误: %v", rawURL, rp.config.Timeout, err)
 	} else if rp.isRedirectError(err) {
-		logger.Warnf("重定向处理失败: %s, 错误: %v", rawURL, err)
+		logger.Warnf("重定向失败: %s, 错误: %v", rawURL, err)
 	} else {
-		logger.Debugf("请求失败: %s, 错误: %v", rawURL, err)
+		logger.Debugf("请求异常: %s, 错误: %v", rawURL, err)
 	}
 }
 
@@ -461,7 +461,7 @@ func (rp *RequestProcessor) Close() {
 }
 
 // 性能优化：预编译的超时错误正则表达式
-var timeoutErrorRegex = regexp.MustCompile(`(?i)(timeout|context canceled|context deadline exceeded|dial timeout|read timeout|write timeout|i/o timeout|deadline exceeded|operation was canceled)`)
+var timeoutErrorRegex = regexp.MustCompile(`(?i)(timeout|timed out|context canceled|context deadline exceeded|dial timeout|read timeout|write timeout|i/o timeout|deadline exceeded|operation was canceled)`)
 
 // isTimeoutOrCanceledError 判断是否为超时或取消相关的错误（性能优化版）
 func (rp *RequestProcessor) isTimeoutOrCanceledError(err error) bool {
@@ -483,7 +483,7 @@ func (rp *RequestProcessor) isRetryableError(err error) bool {
 
 	// 可重试的错误类型
 	retryableErrors := []string{
-		"timeout", "connection reset", "connection refused",
+		"timeout", "timed out", "connection reset", "connection refused",
 		"temporary failure", "network unreachable", "host unreachable",
 		"dial timeout", "read timeout", "write timeout", "i/o timeout",
 		"context deadline exceeded", "server closed idle connection",

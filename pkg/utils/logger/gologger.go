@@ -2,6 +2,7 @@ package logger
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strings"
@@ -12,6 +13,30 @@ import (
 )
 
 // veo日志系统 - gologger兼容层
+
+// StandardLogFilter 用于过滤标准库log输出的特定消息
+type StandardLogFilter struct{}
+
+func (f *StandardLogFilter) Write(p []byte) (n int, err error) {
+	msg := string(p)
+	if strings.Contains(msg, "Deprecated newline only separator found in header") {
+		return len(p), nil
+	}
+	return os.Stderr.Write(p)
+}
+
+// FastHTTPLogger 是一个包装器，用于过滤 fasthttp 的特定日志
+type FastHTTPLogger struct{}
+
+func (l *FastHTTPLogger) Printf(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	// 过滤 "Deprecated newline only separator found in header" 警告
+	if strings.Contains(msg, "newline only separator") {
+		return
+	}
+	// 将其他 fasthttp 日志作为 Debug 输出，避免干扰常规输出
+	Debug(msg)
+}
 
 // Formatter veo自定义日志格式化器
 // 由于gologger的API限制，我们使用一个简化的方法来实现自定义格式
@@ -48,6 +73,11 @@ func InitializeLogger(config *LogConfig) error {
 	if err := configureGologger(config); err != nil {
 		return fmt.Errorf("配置gologger失败: %v", err)
 	}
+
+	// 设置 fasthttp 的日志记录器，过滤掉干扰日志
+	// fasthttp.SetLogger(&FastHTTPLogger{}) - 移除全局设置，改为在Client实例中设置
+	// 由于 fasthttp 默认使用标准库 log，我们通过拦截 log 输出进行过滤
+	log.SetOutput(&StandardLogFilter{})
 
 	// 创建全局日志实例
 	globalLogger = &Logger{

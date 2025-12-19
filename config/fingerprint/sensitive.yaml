@@ -194,30 +194,6 @@ asp-webshell:
   - regex(body, '(?i)mmshell')
   - regex(body, '(?i)GetCmd')
 
-jsp-webshell:
-  dsl:
-  - regex(body, '(?i)(ClassLoader|ProcessBuilder|getInputStream|loadClass|defineClass|URLClassLoader)\(')
-  - regex(body, '(?i)cmd.exe')
-  - regex(body, '(?i)/bin/sh')
-  - regex(body, '(?i)/bin/bash')
-  - regex(body, '(?i)exeCmd')
-
-php-webshell:
-  dsl:
-  - regex(body, '(?i)\b(passthru|phpinfo|call_user_func|call_user_func_array)\(')
-  - regex(body, '(?i)cmd.exe')
-  - regex(body, '(?i)/bin/sh')
-  - regex(body, '(?i)/bin/bash')
-  - regex(body, '(?i)WScript.Shell')
-  - regex(body, '(?i)gzuncompress\(base64_decode\(')
-  - regex(body, '\]\(\$_(GET|POST|COOKIE|REQUEST)\[')
-  - regex(body, '(?i)new\s*(ReflectionFunction|ReflectionClass)')
-  - regex(body, '(?i)0x647261646e617473')
-  - regex(body, '65786563')
-  - regex(body, '(?i)\$\w+\(\$_(GET|POST|COOKIE|REQUEST)')
-  - regex(body, '(?i)cmdshell')
-  - regex(body, '(?i)b4tm4n')
-
 阿里云:
   dsl:
   - regex(body, '(LTAI[A-Za-z0-9]{12,20})')

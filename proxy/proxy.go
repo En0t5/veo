@@ -7,9 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-
 	"veo/pkg/utils/logger"
-	"veo/pkg/utils/formatter"
+	"veo/pkg/utils/network"
 
 	"github.com/lqqyt2423/go-mitmproxy/cert"
 )
@@ -122,9 +121,9 @@ func (proxy *Proxy) getUpstreamConn(ctx context.Context, req *http.Request) (net
 		return nil, err
 	}
 	var conn net.Conn
-	address := formatter.CanonicalAddr(req.URL)
+	address := network.CanonicalAddr(req.URL)
 	if proxyUrl != nil {
-		conn, err = formatter.GetProxyConn(ctx, proxyUrl, address, proxy.Opts.SslInsecure)
+		conn, err = network.GetProxyConn(ctx, proxyUrl, address, proxy.Opts.SslInsecure)
 	} else {
 		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	}

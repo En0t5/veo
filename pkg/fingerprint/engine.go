@@ -1,3 +1,4 @@
+
 package fingerprint
 
 import (
@@ -583,6 +584,81 @@ func (e *Engine) ExecuteActiveProbing(ctx context.Context, baseURL string, httpC
 	return results, nil
 }
 
+// ExecuteIconProbing 执行Icon主动探测（同步返回结果）
+func (e *Engine) ExecuteIconProbing(ctx context.Context, baseURL string, httpClient httpclient.HTTPClientInterface) (*ProbeResult, error) {
+	logger.Debugf("开始Icon主动探测: %s", baseURL)
+
+	// 获取Icon规则
+	iconRules := e.ruleManager.GetIconRules()
+	if len(iconRules) == 0 {
+		return nil, nil
+	}
+
+	// 构造一个基础响应上下文，仅包含URL信息，供DSL解析器使用
+	_, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("URL解析失败: %v", err)
+	}
+	
+	// 构造一个虚拟的HTTPResponse，用于传递BaseURL等信息
+	// 注意：Body为空，Icon请求由DSL内部发起
+	resp := &HTTPResponse{
+		URL:             baseURL,
+		Method:          "GET",
+		StatusCode:      200, // 假定基础页面存在
+		ResponseHeaders: make(map[string][]string),
+		Body:            "", 
+		Title:           "",
+	}
+
+	// 创建DSL上下文，注入HTTP客户端（这是触发Active Mode的关键）
+	dslCtx := e.createDSLContextWithClient(resp, httpClient, baseURL)
+
+	var matches []*FingerprintMatch
+
+	// 遍历Icon规则并匹配
+	// 优化：虽然这里看似遍历所有规则，但 CheckIconMatch 内部有 Singleflight 和 Cache 机制
+	// 只有未缓存的 Icon 路径会发起真实请求。
+	for _, rule := range iconRules {
+		if match := e.matchRule(rule, dslCtx); match != nil {
+			matches = append(matches, match)
+		}
+	}
+
+	if len(matches) > 0 {
+		return &ProbeResult{
+			Response: resp,
+			Matches:  matches,
+		}, nil
+	}
+
+	return nil, nil
+}
+
+// match404PageFingerprints 对404页面进行全量指纹规则匹配
+func (e *Engine) match404PageFingerprints(response *HTTPResponse, httpClient httpclient.HTTPClientInterface, baseURL string) []*FingerprintMatch {
+	logger.Debugf("开始404页面全量指纹匹配")
+
+	// 创建DSL上下文（支持主动探测）
+	ctx := e.createDSLContextWithClient(response, httpClient, baseURL)
+
+	var matches []*FingerprintMatch
+
+	// 获取所有指纹规则进行匹配（使用快照）
+	rules := e.ruleManager.GetRulesSnapshot()
+
+	// 遍历所有规则进行匹配
+	for _, rule := range rules {
+		if match := e.matchRule(rule, ctx); match != nil {
+			matches = append(matches, match)
+			logger.Debugf("404页面匹配到指纹: %s (规则: %s)",
+				match.Technology, match.RuleName)
+		}
+	}
+
+	logger.Debugf("404页面全量匹配完成，共匹配到 %d 个指纹", len(matches))
+	return matches
+}
 // Execute404Probing 执行404页面探测（同步返回结果）
 func (e *Engine) Execute404Probing(ctx context.Context, baseURL string, httpClient httpclient.HTTPClientInterface) (*ProbeResult, error) {
 	logger.Debugf("开始404页面指纹识别: %s", baseURL)
@@ -622,31 +698,6 @@ func (e *Engine) Execute404Probing(ctx context.Context, baseURL string, httpClie
 	}
 
 	return nil, nil
-}
-
-// match404PageFingerprints 对404页面进行全量指纹规则匹配
-func (e *Engine) match404PageFingerprints(response *HTTPResponse, httpClient httpclient.HTTPClientInterface, baseURL string) []*FingerprintMatch {
-	logger.Debugf("开始404页面全量指纹匹配")
-
-	// 创建DSL上下文（支持主动探测）
-	ctx := e.createDSLContextWithClient(response, httpClient, baseURL)
-
-	var matches []*FingerprintMatch
-
-	// 获取所有指纹规则进行匹配（使用快照）
-	rules := e.ruleManager.GetRulesSnapshot()
-
-	// 遍历所有规则进行匹配
-	for _, rule := range rules {
-		if match := e.matchRule(rule, ctx); match != nil {
-			matches = append(matches, match)
-			logger.Debugf("404页面匹配到指纹: %s (规则: %s)",
-				match.Technology, match.RuleName)
-		}
-	}
-
-	logger.Debugf("404页面全量匹配完成，共匹配到 %d 个指纹", len(matches))
-	return matches
 }
 
 func makeRequestWithOptionalHeaders(httpClient httpclient.HTTPClientInterface, targetURL string, headers map[string]string) (string, int, error) {
@@ -689,9 +740,9 @@ func (e *Engine) GetPathRulesCount() int {
 	return e.ruleManager.GetPathRulesCount()
 }
 
-// GetPathRules 获取所有包含path字段的规则（公共方法，供CLI使用）
-func (e *Engine) GetPathRules() []*FingerprintRule {
-	return e.ruleManager.GetPathRules()
+// GetIconRules 获取所有包含 icon() 函数的规则 (代理方法)
+func (e *Engine) GetIconRules() []*FingerprintRule {
+	return e.ruleManager.GetIconRules()
 }
 
 // MatchSpecificRule 匹配指定的单个规则（公开方法，供CLI使用）

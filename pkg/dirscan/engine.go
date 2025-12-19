@@ -84,6 +84,12 @@ func (e *Engine) PerformScan(collectorInstance interfaces.URLCollectorInterface)
 
 // PerformScanWithFilter 执行扫描（支持自定义过滤器）
 func (e *Engine) PerformScanWithFilter(collectorInstance interfaces.URLCollectorInterface, recursive bool, filter *ResponseFilter) (*ScanResult, error) {
+	e.mu.Lock()
+	if e.stats == nil {
+		e.stats = &Statistics{StartTime: time.Now()}
+	}
+	e.mu.Unlock()
+
 	startTime := time.Now()
 
 	// 1. 生成扫描URL
@@ -117,9 +123,9 @@ func (e *Engine) PerformScanWithFilter(collectorInstance interfaces.URLCollector
 
 	// 准备累积结果和锁
 	finalFilterResult := &interfaces.FilterResult{
-		ValidPages:           make([]interfaces.HTTPResponse, 0),
-		PrimaryFilteredPages: make([]interfaces.HTTPResponse, 0),
-		StatusFilteredPages:  make([]interfaces.HTTPResponse, 0),
+		ValidPages:           make([]*interfaces.HTTPResponse, 0),
+		PrimaryFilteredPages: make([]*interfaces.HTTPResponse, 0),
+		StatusFilteredPages:  make([]*interfaces.HTTPResponse, 0),
 	}
 	var resultMu sync.Mutex
 
@@ -133,15 +139,15 @@ func (e *Engine) PerformScanWithFilter(collectorInstance interfaces.URLCollector
 		}
 		// 转换并过滤
 		// 注意：这里我们构造一个单元素的切片进行处理
-		filterInput := e.convertToFilterResponses([]*interfaces.HTTPResponse{resp})
+		// [优化] 现在 FilterResponses 接收 []*HTTPResponse，直接传递即可
+		filterInput := []*interfaces.HTTPResponse{resp}
 		singleResult := responseFilter.FilterResponses(filterInput)
-
-		// 实时输出有效页面
-		if len(singleResult.ValidPages) > 0 {
-			// [优化] ResponseFilter 内部已有锁，直接调用
-			responseFilter.PrintValidPages(singleResult.ValidPages)
+		if singleResult == nil {
+			logger.Warnf("ResponseFilter.FilterResponses returned nil for URL: %s", resp.URL)
+			return
 		}
 
+		// 实时输出有效页面
 		// 累积结果 (线程安全)
 		resultMu.Lock()
 		if len(singleResult.ValidPages) > 0 {
@@ -168,7 +174,9 @@ func (e *Engine) PerformScanWithFilter(collectorInstance interfaces.URLCollector
 	atomic.StoreInt64(&e.stats.TotalRequests, int64(len(responses)))
 
 	// 补充：收集无效页面哈希统计 (从过滤器中获取最终状态)
-	finalFilterResult.InvalidPageHashes = responseFilter.GetInvalidPageHashes()
+	if responseFilter != nil {
+		finalFilterResult.InvalidPageHashes = responseFilter.GetInvalidPageHashes()
+	}
 	// 注意：这里我们假设过滤器是 HashFilter，如果接口支持的话
 	// 实际上 ResponseFilter 封装了这些细节，但 GetHashFilter 方法在 ResponseFilter 中有导出
 
@@ -287,10 +295,6 @@ func (e *Engine) getOrCreateRequestProcessor() *requests.RequestProcessor {
 	// 3. 直接更新，无需条件判断，确保配置绝对生效
 	e.requestProcessor.UpdateConfig(reqConfig)
 
-	// 强行日志输出，验证配置是否生效
-	// logger.Debugf("Dirscan配置已强制同步: Proxy=%s, FollowRedirect=%v, MaxRedirects=%d",
-	// 	reqConfig.ProxyURL, reqConfig.FollowRedirect, reqConfig.MaxRedirects)
-
 	return e.requestProcessor
 }
 
@@ -335,18 +339,17 @@ func (e *Engine) applyFilter(responses []*interfaces.HTTPResponse, externalFilte
 	}
 
 	// 转换为过滤器可处理的格式
-	filterResponses := e.convertToFilterResponses(responses)
+	// [优化] 直接传递指针切片，convertToFilterResponses 已废弃或修改
+	// filterResponses := e.convertToFilterResponses(responses)
 
 	// 应用过滤器
-	filterResult := responseFilter.FilterResponses(filterResponses)
-
-	// 显示过滤结果（包含指纹信息）
-	responseFilter.PrintFilterResult(filterResult)
+	filterResult := responseFilter.FilterResponses(responses)
 
 	return filterResult, nil
 }
 
 // convertToFilterResponses 转换响应格式（内存优化版本）
+// [已废弃] FilterResponses 现在直接接收 []*HTTPResponse，无需转换
 func (e *Engine) convertToFilterResponses(httpResponses []*interfaces.HTTPResponse) []interfaces.HTTPResponse {
 	filterResponses := make([]interfaces.HTTPResponse, len(httpResponses))
 	for i, resp := range httpResponses {

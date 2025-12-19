@@ -24,9 +24,7 @@ type RequestProcessorInterface interface {
 // 负责过滤和处理HTTP响应
 type ResponseFilterInterface interface {
 	// 过滤响应列表
-	FilterResponses(responses []HTTPResponse) *FilterResult
-	// 打印过滤结果
-	PrintFilterResult(result *FilterResult)
+	FilterResponses(responses []*HTTPResponse) *FilterResult
 }
 
 // 数据结构定义

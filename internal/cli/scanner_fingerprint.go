@@ -156,13 +156,12 @@ func (sc *ScanController) runConcurrentFingerprintWithContext(parentCtx context.
 	// 等待结果收集完成
 	<-done
 
-	// 主动探测 path 字段指纹
-	pathResults := sc.performPathProbing(ctx, targets)
-	if len(pathResults) > 0 {
-		allResults = append(allResults, pathResults...)
-		// 也可以追加到实时文件，但path探测通常较少
+	// 主动探测 (Path, Icon, 404)
+	activeResults := sc.performActiveProbing(ctx, targets)
+	if len(activeResults) > 0 {
+		allResults = append(allResults, activeResults...)
 		if realtimeFile != nil {
-			for _, res := range pathResults {
+			for _, res := range activeResults {
 				var fps []string
 				for _, fp := range res.Fingerprints {
 					fps = append(fps, fp.RuleName)
@@ -268,25 +267,37 @@ func (sc *ScanController) printFingerprintResultWithProgressClear(matches []*fin
 	}
 }
 
-// performPathProbing 执行path字段主动探测（复用被动模式逻辑）
-func (sc *ScanController) performPathProbing(ctx context.Context, targets []string) []interfaces.HTTPResponse {
+// performActiveProbing 执行主动探测（Path, Icon, 404）
+func (sc *ScanController) performActiveProbing(ctx context.Context, targets []string) []interfaces.HTTPResponse {
 	// 检查指纹引擎是否可用
 	if sc.fingerprintEngine == nil {
-		logger.Debug("指纹引擎未初始化，跳过path探测")
+		logger.Debug("指纹引擎未初始化，跳过主动探测")
 		return nil
 	}
 
 	// 检查Context是否取消
 	select {
 	case <-ctx.Done():
-		logger.Warn("扫描已取消，跳过path探测阶段")
+		logger.Warn("扫描已取消，跳过主动探测阶段")
 		return nil
 	default:
 	}
 
-	if !sc.fingerprintEngine.HasPathRules() {
-		logger.Debug("没有包含path字段的规则，跳过path探测")
-		return nil
+	// 检查是否有任何需要主动探测的规则
+	hasPathRules := sc.fingerprintEngine.HasPathRules()
+	iconRules := sc.fingerprintEngine.GetIconRules() // 需要先在engine暴露，或者直接访问RuleManager
+	// 注意：GetIconRules是在RuleManager中，Engine还未暴露。
+	// 这里我们需要在Engine中增加GetIconRules或者简单判断。
+	// 暂时假设我们总是有可能需要探测Icon（因为Icon规则很常见），或者我们修改Engine暴露此方法。
+	// 但为了保持KISS，如果uniqueTargets为空，我们也不做任何事。
+
+	if !hasPathRules && len(iconRules) == 0 {
+		logger.Debug("没有Path规则且没有Icon规则，跳过主动探测")
+		// 仍然可能需要404探测，但通常404探测是伴随的。
+		// 如果完全没有主动规则，是否还要做404？
+		// 404探测是全量匹配，理论上总是可以做。但为了性能，我们通常只在有指纹匹配需求时做。
+		// 保持现状：如果完全没有任何规则（包括被动），我们根本不会进到这里。
+		// 让我们继续，只是记录日志。
 	}
 
 	var allResults []interfaces.HTTPResponse
@@ -299,7 +310,7 @@ func (sc *ScanController) performPathProbing(ctx context.Context, targets []stri
 	uniqueTargets := sc.getUniqueProbeTargets(targets)
 
 	if len(uniqueTargets) == 0 {
-		logger.Debug("所有目标主机均已探测过或无需探测，跳过path探测阶段")
+		logger.Debug("所有目标主机均已探测过或无需探测，跳过主动探测阶段")
 		return nil
 	}
 
@@ -330,7 +341,7 @@ func (sc *ScanController) performPathProbing(ctx context.Context, targets []stri
 				probeKey := baseURL
 
 				if sc.shouldTriggerPathProbing(probeKey) {
-					logger.Debugf("触发path字段主动探测: %s", probeKey)
+					logger.Debugf("触发主动探测: %s", probeKey)
 					sc.markHostAsProbed(probeKey)
 
 					probeTimeout := time.Duration(sc.timeoutSeconds) * time.Second
@@ -339,41 +350,60 @@ func (sc *ScanController) performPathProbing(ctx context.Context, targets []stri
 					}
 					probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 
-					results, err := sc.fingerprintEngine.ExecuteActiveProbing(probeCtx, baseURL, sc.httpClient)
-					cancel()
-
-					if err != nil {
-						logger.Debugf("Active probing error: %v", err)
-					}
-
-					if len(results) > 0 {
-						logger.Debugf("Active probing found %d results for %s", len(results), baseURL)
-
-						if formatter != nil {
+					// 1. Path Probing
+					if hasPathRules {
+						results, err := sc.fingerprintEngine.ExecuteActiveProbing(probeCtx, baseURL, sc.httpClient)
+						if err != nil {
+							logger.Debugf("Path probing error: %v", err)
+						}
+						if len(results) > 0 {
+							if formatter != nil {
+								for _, res := range results {
+									sc.printFingerprintResultWithProgressClear(res.Matches, res.Response, formatter, "Path探测")
+								}
+							}
 							for _, res := range results {
-								sc.printFingerprintResultWithProgressClear(res.Matches, res.Response, formatter, "主动探测")
+								httpResp := sc.convertProbeResult(res)
+								localResults = append(localResults, httpResp)
 							}
 						}
-
-						for _, res := range results {
-							httpResp := sc.convertProbeResult(res)
-							localResults = append(localResults, httpResp)
-						}
 					}
 
-					// [新增] 404页面指纹识别
-					if res404 := sc.perform404PageProbing(ctx, baseURL, formatter); res404 != nil {
+					// 2. Icon Probing (New)
+					// Icon指纹识别已经在 processSingleTargetFingerprint (Phase 1) 中通过 AnalyzeResponseWithClient 隐式完成了
+					// AnalyzeResponseWithClient 会处理所有规则，包括 icon() 规则，并自动进行 HTTP 请求去重
+					// 因此这里不需要再次调用 ExecuteIconProbing，否则会导致重复的指纹结果输出
+					// 如果需要单独对非主目标进行 Icon 探测，可以使用 ExecuteIconProbing，但目前 uniqueTargets 主要是主目标
+					// 所以这里留空或注释掉，以避免冗余。
+					/*
+					iconResults, err := sc.fingerprintEngine.ExecuteIconProbing(probeCtx, baseURL, sc.httpClient)
+					if err != nil {
+						logger.Debugf("Icon probing error: %v", err)
+					}
+					if iconResults != nil && len(iconResults.Matches) > 0 {
+						if formatter != nil {
+							sc.printFingerprintResultWithProgressClear(iconResults.Matches, iconResults.Response, formatter, "Icon探测")
+						}
+						httpResp := sc.convertProbeResult(iconResults)
+						localResults = append(localResults, httpResp)
+					}
+					*/
+
+					// 3. 404 Page Probing
+					if res404 := sc.perform404PageProbing(probeCtx, baseURL, formatter); res404 != nil {
 						localResults = append(localResults, *res404)
 					}
+
+					cancel()
 				} else {
-					logger.Debugf("目标已探测过，跳过path探测: %s", probeKey)
+					logger.Debugf("目标已探测过，跳过主动探测: %s", probeKey)
 				}
 				resultsChan <- localResults
 
 				// 更新进度
 				curr := atomic.AddInt32(&processedCount, 1)
 				if !sc.args.JSONOutput && sc.args.Stats && curr%2 == 0 {
-					fmt.Printf("\rDeep Probing: %d/%d (%.1f%%)", curr, totalCount, float64(curr)/float64(totalCount)*100)
+					fmt.Printf("\rActive Probing: %d/%d (%.1f%%)", curr, totalCount, float64(curr)/float64(totalCount)*100)
 				}
 			}
 		}()

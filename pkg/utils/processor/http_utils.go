@@ -1,7 +1,6 @@
 package processor
 
 import (
-	"bytes"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -12,6 +11,7 @@ import (
 
 	"veo/pkg/utils/interfaces"
 	"veo/pkg/utils/logger"
+	sharedutils "veo/pkg/utils/shared"
 
 	"github.com/valyala/fasthttp"
 	netproxy "golang.org/x/net/proxy"
@@ -180,31 +180,26 @@ func (rp *RequestProcessor) processResponseBody(rawBody []byte) string {
 // processResponse 处理fasthttp响应，构建HTTPResponse结构体
 func (rp *RequestProcessor) processResponse(url string, resp *fasthttp.Response, requestHeaders map[string][]string, startTime time.Time) (*interfaces.HTTPResponse, error) {
 	// 尝试解压响应体（如果启用了压缩且服务器返回了压缩数据）
-	// fasthttp.Response.Body() 返回原始内容，如果Content-Encoding是gzip，则需要手动解压
-	// 这对于后续的正则匹配（如重定向检测）至关重要
-	var rawBody []byte
-	contentEncoding := resp.Header.Peek("Content-Encoding")
-
-	if bytes.EqualFold(contentEncoding, []byte("gzip")) {
-		var err error
-		rawBody, err = resp.BodyGunzip()
-		if err != nil {
-			logger.Debugf("Gzip解压失败: %s, 错误: %v, 使用原始Body", url, err)
-			rawBody = resp.Body()
-		}
-	} else if bytes.EqualFold(contentEncoding, []byte("deflate")) {
-		var err error
-		rawBody, err = resp.BodyInflate()
-		if err != nil {
-			logger.Debugf("Deflate解压失败: %s, 错误: %v, 使用原始Body", url, err)
-			rawBody = resp.Body()
-		}
+	// 使用 sharedutils.DecompressByEncoding 统一处理所有解压逻辑
+	// 注意：fasthttp 会自动处理传输层的解压（如果启用了自动处理），但有时候我们需要手动处理
+	var finalBody []byte
+	contentEncoding := string(resp.Header.Peek("Content-Encoding"))
+	
+	if contentEncoding != "" {
+		// 使用 sharedutils 统一解压，支持 gzip, deflate, br
+		// 注意：rawBody 是原始 body，可能已压缩
+		rawBody := resp.Body()
+		finalBody = sharedutils.DecompressByEncoding(rawBody, contentEncoding)
+		
+		// 如果解压后的长度不同，说明确实发生了压缩，此时我们更新 Content-Length
+		// 但通常我们不修改 resp 本身，只是在后续使用 finalBody
 	} else {
-		rawBody = resp.Body()
+		finalBody = resp.Body()
 	}
 
 	// 提取响应基本信息
-	body := rp.processResponseBody(rawBody)
+	// 注意：processResponseBody 会处理大小限制（截断），它接收 []byte 返回 string
+	body := rp.processResponseBody(finalBody)
 	title := rp.extractTitleSafely(url, body)
 	contentLength := rp.getContentLength(resp, body)
 	contentType := rp.getContentType(resp)

@@ -563,6 +563,9 @@
 /xxl-job-admin/toLogin
 
 # 4. 文件上传 & 编辑器上传 & GetShell 高危点
+/form.html
+/upload_file.html
+/uploadfile.html
 /UEditor/
 /UploadFile
 /UploadFile/

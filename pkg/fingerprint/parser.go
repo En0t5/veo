@@ -4,7 +4,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"veo/pkg/utils/logger"
 )
 
 var (
@@ -230,7 +229,6 @@ func (p *DSLParser) evaluateIcon(dsl string, ctx *DSLContext) (bool, bool) {
 
 			// 检查是否有HTTP客户端、基础URL和Engine实例（主动探测必需）
 			if ctx.HTTPClient == nil || ctx.BaseURL == "" || ctx.Engine == nil {
-				logger.Debugf("icon()函数缺少必要组件，跳过主动探测")
 				return false, false
 			}
 

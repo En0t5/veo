@@ -9,11 +9,11 @@ require (
 	github.com/lqqyt2423/go-mitmproxy v1.8.5
 	github.com/projectdiscovery/gologger v1.1.54
 	github.com/satori/go.uuid v1.2.0
-	github.com/valyala/fasthttp v1.64.0
+	github.com/valyala/fasthttp v1.68.0
 	github.com/xuri/excelize/v2 v2.9.1
 	go.uber.org/atomic v1.11.0
-	golang.org/x/net v0.42.0
-	golang.org/x/text v0.27.0
+	golang.org/x/net v0.48.0
+	golang.org/x/text v0.32.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -28,7 +28,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
@@ -50,7 +50,7 @@ require (
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/nfp v0.0.1 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
-	golang.org/x/crypto v0.40.0 // indirect
-	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/crypto v0.46.0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
 	gopkg.in/djherbis/times.v1 v1.3.0 // indirect
 )

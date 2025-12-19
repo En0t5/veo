@@ -124,9 +124,13 @@ func extractResponses(filterResult *interfaces.FilterResult) []interfaces.HTTPRe
 		return nil
 	}
 
-	copied := make([]interfaces.HTTPResponse, len(pages))
-	copy(copied, pages)
-	return copied
+	result := make([]interfaces.HTTPResponse, len(pages))
+	for i, p := range pages {
+		if p != nil {
+			result[i] = *p
+		}
+	}
+	return result
 }
 
 // buildCombinedAPIResponse 构建统一的API/CLI JSON响应结构

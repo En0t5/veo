@@ -10,6 +10,7 @@ import (
 
 	"veo/internal/scheduler"
 	"veo/pkg/dirscan"
+	"veo/pkg/utils/formatter"
 	"veo/pkg/utils/interfaces"
 	"veo/pkg/utils/logger"
 )
@@ -113,13 +114,24 @@ func (sc *ScanController) runConcurrentDirscan(ctx context.Context, targets []st
 	var allResults []interfaces.HTTPResponse
 	var resultsMu sync.Mutex
 
+	// 启动独立的打印协程
+	printChan := make(chan *interfaces.HTTPResponse, 100)
+	printWg := sync.WaitGroup{}
+	printWg.Add(1)
+	go sc.startResultPrinter(printChan, &printWg, filter)
+
 	scheduler.SetResultCallback(func(target string, resp *interfaces.HTTPResponse) {
-		sc.handleRealTimeResult(ctx, target, resp, filter, &allResults, &resultsMu)
+		sc.handleRealTimeResult(ctx, target, resp, filter, &allResults, &resultsMu, printChan)
 	})
 
 	// 执行并发扫描
 	// 注意：虽然 ExecuteConcurrentScan 返回所有原始结果，但我们已经在回调中处理了有效结果
 	_, err := scheduler.ExecuteConcurrentScan()
+	
+	// 关闭打印通道并等待打印完成
+	close(printChan)
+	printWg.Wait()
+
 	if err != nil {
 		return nil, fmt.Errorf("多目标并发扫描失败: %v", err)
 	}
@@ -129,6 +141,17 @@ func (sc *ScanController) runConcurrentDirscan(ctx context.Context, targets []st
 
 func (sc *ScanController) runSequentialDirscan(ctx context.Context, targets []string, filter *dirscan.ResponseFilter, recursive bool) ([]interfaces.HTTPResponse, error) {
 	var allResults []interfaces.HTTPResponse
+
+	// 启动独立的打印协程
+	printChan := make(chan *interfaces.HTTPResponse, 100)
+	printWg := sync.WaitGroup{}
+	printWg.Add(1)
+	go sc.startResultPrinter(printChan, &printWg, filter)
+
+	defer func() {
+		close(printChan)
+		printWg.Wait()
+	}()
 
 	for _, target := range targets {
 		// 检查Context取消
@@ -158,7 +181,7 @@ func (sc *ScanController) runSequentialDirscan(ctx context.Context, targets []st
 		// 发起HTTP请求（实时处理）
 		// 使用 ProcessURLsWithCallback 替代 ProcessURLs
 		sc.requestProcessor.ProcessURLsWithCallback(scanURLs, func(resp *interfaces.HTTPResponse) {
-			sc.handleRealTimeResult(ctx, target, resp, filter, &allResults, nil)
+			sc.handleRealTimeResult(ctx, target, resp, filter, &allResults, nil, printChan)
 		})
 
 		// 更新已完成主机数统计（单目标扫描）
@@ -214,20 +237,148 @@ func (sc *ScanController) generateDirscanURLs(target string, recursive bool) []s
 }
 
 // handleRealTimeResult 处理实时扫描结果（DRY优化）
-func (sc *ScanController) handleRealTimeResult(ctx context.Context, target string, resp *interfaces.HTTPResponse, filter *dirscan.ResponseFilter, results *[]interfaces.HTTPResponse, mu *sync.Mutex) {
+func (sc *ScanController) handleRealTimeResult(ctx context.Context, target string, resp *interfaces.HTTPResponse, filter *dirscan.ResponseFilter, results *[]interfaces.HTTPResponse, mu *sync.Mutex, printChan chan<- *interfaces.HTTPResponse) {
 	if resp == nil {
 		return
 	}
-	// 调用 processTargetResponses 处理单个响应（包含过滤、去重、打印）
+	// 调用 processTargetResponses 处理单个响应（包含过滤、去重）
+	// 注意：现在不直接打印，而是返回有效页面供后续处理
 	validPages, _ := sc.processTargetResponses(ctx, []*interfaces.HTTPResponse{resp}, target, filter)
 
 	if len(validPages) > 0 {
 		if mu != nil {
 			mu.Lock()
 		}
-		*results = append(*results, validPages...)
+		
+		for i := range validPages {
+			page := validPages[i] // 获取指针
+			if page == nil {
+				continue
+			}
+			// 添加到结果集（由于 validPages 是指针切片，我们需要解引用来存储值，或者修改 results 类型）
+			// 这里 results 是 []interfaces.HTTPResponse (值切片)，为了兼容现有代码结构
+			*results = append(*results, *page)
+			
+			// 发送到打印通道
+			if printChan != nil {
+				printChan <- page
+			}
+		}
+		
 		if mu != nil {
 			mu.Unlock()
 		}
 	}
+}
+
+// startResultPrinter 启动结果打印协程
+func (sc *ScanController) startResultPrinter(printChan <-chan *interfaces.HTTPResponse, wg *sync.WaitGroup, filter *dirscan.ResponseFilter) {
+	defer wg.Done()
+	
+	for page := range printChan {
+		if page == nil {
+			continue
+		}
+		// 使用提取出来的打印逻辑
+		sc.printSingleValidPage(page, filter)
+	}
+}
+
+// printSingleValidPage 打印单个有效页面（从ResponseFilter提取出的逻辑）
+func (sc *ScanController) printSingleValidPage(page *interfaces.HTTPResponse, filter *dirscan.ResponseFilter) {
+	// 使用已经识别好的指纹信息
+	matches := page.Fingerprints
+	var fingerprintUnion string
+
+	// 格式化指纹显示
+	if len(matches) > 0 {
+		// 转换为指针列表以便使用 formatFingerprintMatches (这是一个 hack，因为 formatter 需要 []*Match)
+		matchPtrs := make([]*interfaces.FingerprintMatch, len(matches))
+		for i := range matches {
+			matchPtrs[i] = &matches[i]
+		}
+		
+		// 暂时还需要访问 filter 获取显示配置，理想情况这应该在 Printer 配置中
+		// 但为了最小化改动，我们这里还是复用 filter 的方法，只是逻辑在外部控制
+		// 注意：formatFingerprintMatches 是私有方法，我们需要在 filter.go 中公开它或者复制逻辑
+		// 这里我们暂时假设 ResponseFilter 还有这个能力，或者我们需要把它移出来
+		// 由于 formatFingerprintMatches 是私有的，我们暂时无法直接调用。
+		// 我们需要修改 filter.go 将其公开，或者在 cli 包中实现格式化逻辑。
+		// 鉴于 KISS 原则，我们在 cli 包中实现一个简单的 wrapper
+		fingerprintUnion = sc.formatFingerprintMatches(matchPtrs, sc.showFingerprintRule)
+	}
+
+	fingerprintParts := []string{}
+	if strings.TrimSpace(fingerprintUnion) != "" {
+		fingerprintParts = append(fingerprintParts, fingerprintUnion)
+	}
+
+	line := formatter.FormatLogLine(
+		page.URL,
+		page.StatusCode,
+		page.Title,
+		page.ContentLength,
+		page.ContentType,
+		fingerprintParts,
+		len(matches) > 0,
+	)
+
+	var messageBuilder strings.Builder
+	messageBuilder.WriteString(line)
+
+	// 如果 URL 过长（超过 60 字符），在下一行输出完整 URL 方便复制
+	if len(page.URL) > 60 {
+		messageBuilder.WriteString("\n")
+		messageBuilder.WriteString("  └─ ")
+		messageBuilder.WriteString(formatter.FormatFullURL(page.URL))
+	}
+
+	if sc.showFingerprintSnippet && len(matches) > 0 {
+		var snippetLines []string
+		for _, m := range matches {
+			snippet := strings.TrimSpace(m.Snippet)
+			if snippet == "" {
+				continue
+			}
+			highlighted := formatter.HighlightSnippet(snippet, m.Matcher)
+			if highlighted == "" {
+				continue
+			}
+			snippetLines = append(snippetLines, highlighted)
+		}
+		if len(snippetLines) > 0 {
+			messageBuilder.WriteString("\n")
+			for idx, snippetLine := range snippetLines {
+				if idx > 0 {
+					messageBuilder.WriteString("\n")
+				}
+				messageBuilder.WriteString("  ")
+				messageBuilder.WriteString(formatter.FormatSnippetArrow())
+				messageBuilder.WriteString(snippetLine)
+			}
+		}
+	}
+
+	logger.Info(messageBuilder.String())
+}
+
+// formatFingerprintMatches 格式化指纹匹配结果 (Cli版本)
+func (sc *ScanController) formatFingerprintMatches(matches []*interfaces.FingerprintMatch, showRule bool) string {
+	if len(matches) == 0 {
+		return ""
+	}
+
+	var parts []string
+	for _, match := range matches {
+		if match == nil {
+			continue
+		}
+
+		display := formatter.FormatFingerprintDisplay(match.RuleName, match.Matcher, showRule)
+		if display != "" {
+			parts = append(parts, display)
+		}
+	}
+
+	return strings.Join(parts, " ")
 }

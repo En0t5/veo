@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"veo/pkg/utils/logger"
-	"veo/pkg/utils/formatter"
+	"veo/pkg/utils/network"
 
 	"github.com/lqqyt2423/go-mitmproxy/cert"
 	"golang.org/x/net/http2"
@@ -153,7 +153,7 @@ func (a *attacker) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 func (a *attacker) initHttpDialFn(req *http.Request) {
 	connCtx := req.Context().Value(connContextKey).(*ConnContext)
 	connCtx.dialFn = func(ctx context.Context) error {
-		addr := formatter.CanonicalAddr(req.URL)
+		addr := network.CanonicalAddr(req.URL)
 		c, err := a.proxy.getUpstreamConn(ctx, req)
 		if err != nil {
 			return err
@@ -464,7 +464,7 @@ func (a *attacker) attack(res http.ResponseWriter, req *http.Request) {
 	// Read request body
 	var reqBody io.Reader = req.Body
 	if !f.Stream {
-		reqBuf, r, err := formatter.ReaderToBuffer(req.Body, proxy.Opts.StreamLargeBodies)
+		reqBuf, r, err := network.ReaderToBuffer(req.Body, proxy.Opts.StreamLargeBodies)
 		reqBody = r
 		if err != nil {
 			logger.Errorf("%s %v", prefix, err)
@@ -567,7 +567,7 @@ func (a *attacker) attack(res http.ResponseWriter, req *http.Request) {
 	// Read response body
 	var resBody io.Reader = proxyRes.Body
 	if !f.Stream {
-		resBuf, r, err := formatter.ReaderToBuffer(proxyRes.Body, proxy.Opts.StreamLargeBodies)
+		resBuf, r, err := network.ReaderToBuffer(proxyRes.Body, proxy.Opts.StreamLargeBodies)
 		resBody = r
 		if err != nil {
 			logger.Errorf("%s %v", prefix, err)

@@ -247,21 +247,6 @@ func (e *entry) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		e.handleConnect(res, req)
 		return
 	}
-
-	if !req.URL.IsAbs() || req.URL.Host == "" {
-		res = NewResponseCheck(res)
-		for _, addon := range proxy.Addons {
-			addon.AccessProxyServer(req, res)
-		}
-		if res, ok := res.(*ResponseCheck); ok {
-			if !res.Wrote {
-				res.WriteHeader(400)
-				io.WriteString(res, "此为代理服务器，不能直接发起请求")
-			}
-		}
-		return
-	}
-
 	// http proxy
 	proxy.attacker.initHttpDialFn(req)
 	proxy.attacker.attack(res, req)

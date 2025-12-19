@@ -40,7 +40,7 @@ func GenerateExcelReport(filterResult *interfaces.FilterResult, reportType Excel
 		file.NewSheet(sheet1Name)
 	}
 
-	filteredRows := buildExcelRows(filterResult.ValidPages, reportType)
+	filteredRows := buildExcelRows(toValueSlice(filterResult.ValidPages), reportType)
 	if err := writeSheet(file, sheet1Name, headers, filteredRows); err != nil {
 		return "", fmt.Errorf("写入 Sheet1 失败: %w", err)
 	}
@@ -48,9 +48,9 @@ func GenerateExcelReport(filterResult *interfaces.FilterResult, reportType Excel
 	// Sheet 2: All Results (No Filter)
 	// 合并 ValidPages, PrimaryFilteredPages, StatusFilteredPages
 	var allPages []interfaces.HTTPResponse
-	allPages = append(allPages, filterResult.ValidPages...)
-	allPages = append(allPages, filterResult.PrimaryFilteredPages...)
-	allPages = append(allPages, filterResult.StatusFilteredPages...)
+	allPages = append(allPages, toValueSlice(filterResult.ValidPages)...)
+	allPages = append(allPages, toValueSlice(filterResult.PrimaryFilteredPages)...)
+	allPages = append(allPages, toValueSlice(filterResult.StatusFilteredPages)...)
 
 	sheet2Name := "All Results (No Filter)"
 	file.NewSheet(sheet2Name)
@@ -212,6 +212,13 @@ func buildExcelRow(page interfaces.HTTPResponse, reportType ExcelReportType) []i
 }
 
 // sanitizeSnippet (已移除使用，保留函数或删除均可，建议删除以保持整洁)
-// GeneratePortscanExcel 生成端口扫描 Excel 报告
-// 输出列：IP, Port
-// 端口扫描模块已移除，Excel 报告不再包含端口结果
+// toValueSlice 将指针切片转换为值切片
+func toValueSlice(pages []*interfaces.HTTPResponse) []interfaces.HTTPResponse {
+	result := make([]interfaces.HTTPResponse, len(pages))
+	for i, p := range pages {
+		if p != nil {
+			result[i] = *p
+		}
+	}
+	return result
+}

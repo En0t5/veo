@@ -63,23 +63,8 @@ func (c *Collector) Requestheaders(f *proxy.Flow) {
 
 	originalURL := f.Request.URL.String()
 
-	// 先修复协议相对URL，然后再提取主机信息进行过滤
-	var hostToCheck string
-	if strings.HasPrefix(originalURL, "//") {
-		// 协议相对URL，先修复后再提取主机
-		fixedURL := c.fixProtocolRelativeURL(originalURL)
-		if fixedURL != "" {
-			if parsedURL, err := url.Parse(fixedURL); err == nil {
-				hostToCheck = parsedURL.Host
-			} else {
-				hostToCheck = f.Request.URL.Host // 回退到原始主机
-			}
-		} else {
-			hostToCheck = f.Request.URL.Host // 回退到原始主机
-		}
-	} else {
-		hostToCheck = f.Request.URL.Host
-	}
+	// 提取并检查主机
+	hostToCheck := c.extractHostToCheck(originalURL, f.Request.URL.Host)
 
 	// 检查主机是否被允许
 	if !c.isHostAllowed(hostToCheck) {
@@ -121,22 +106,7 @@ func (c *Collector) Responseheaders(f *proxy.Flow) {
 	statusCode := f.Response.StatusCode
 
 	// 再次检查主机是否被允许（与Requestheaders阶段一致）
-	var hostToCheck string
-	if strings.HasPrefix(originalURL, "//") {
-		// 协议相对URL，先修复后再提取主机
-		fixedURL := c.fixProtocolRelativeURL(originalURL)
-		if fixedURL != "" {
-			if parsedURL, err := url.Parse(fixedURL); err == nil {
-				hostToCheck = parsedURL.Host
-			} else {
-				hostToCheck = f.Request.URL.Host // 回退到原始主机
-			}
-		} else {
-			hostToCheck = f.Request.URL.Host // 回退到原始主机
-		}
-	} else {
-		hostToCheck = f.Request.URL.Host
-	}
+	hostToCheck := c.extractHostToCheck(originalURL, f.Request.URL.Host)
 
 	// 检查主机是否被允许
 	if !c.isHostAllowed(hostToCheck) {
@@ -676,6 +646,24 @@ func (c *Collector) addToFinalCollection(url string, statusCode int) {
 	} else {
 		logger.Debugf("URL已存在，跳过重复: %s", finalURL)
 	}
+}
+
+// extractHostToCheck 从URL中提取需要检查的主机名
+// 统一处理协议相对URL的情况
+func (c *Collector) extractHostToCheck(originalURL string, fallbackHost string) string {
+	if strings.HasPrefix(originalURL, "//") {
+		// 协议相对URL，先修复后再提取主机
+		fixedURL := c.fixProtocolRelativeURL(originalURL)
+		if fixedURL != "" {
+			if parsedURL, err := url.Parse(fixedURL); err == nil {
+				return parsedURL.Host
+			}
+		}
+		// 如果解析失败，回退到fallbackHost
+		return fallbackHost
+	}
+	// 非协议相对URL，直接使用fallbackHost (通常是 Request.URL.Host)
+	return fallbackHost
 }
 
 // 收集控制方法

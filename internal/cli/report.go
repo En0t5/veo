@@ -63,7 +63,12 @@ func generateCustomReport(config *ReportConfig, dirResults, fingerprintResults [
 
 		// 确保指纹结果列表不为空（如果只有dirscan结果，filterResult中可能包含所有）
 		if len(fingerprintResults) == 0 && hasModule(config.Modules, string(modulepkg.ModuleFinger)) {
-			fingerprintResults = filterResult.ValidPages
+			// Convert pointer slice to value slice
+			for _, p := range filterResult.ValidPages {
+				if p != nil {
+					fingerprintResults = append(fingerprintResults, *p)
+				}
+			}
 		}
 
 		jsonStr, err := report.GenerateCombinedJSON(dirResults, fingerprintResults, matches, toReporterStats(stats), config.ScanParams)

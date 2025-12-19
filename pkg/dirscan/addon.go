@@ -132,7 +132,7 @@ func (da *DirscanAddon) TriggerScan() (*ScanResult, error) {
 		CollectedURLs: collectedURLs,
 		Responses:     make([]*interfaces.HTTPResponse, 0),
 		FilterResult: &interfaces.FilterResult{
-			ValidPages: make([]interfaces.HTTPResponse, 0),
+			ValidPages: make([]*interfaces.HTTPResponse, 0),
 		},
 	}
 
@@ -169,7 +169,14 @@ func (da *DirscanAddon) TriggerScan() (*ScanResult, error) {
 		finalResult.Target = scanResult.Target
 
 		// 返回有效页面供递归逻辑使用
-		return scanResult.FilterResult.ValidPages, nil
+		// 转换指针切片为值切片，以匹配 LayerScanner 接口 (未来建议 LayerScanner 也改为指针)
+		validPages := make([]interfaces.HTTPResponse, len(scanResult.FilterResult.ValidPages))
+		for i, p := range scanResult.FilterResult.ValidPages {
+			if p != nil {
+				validPages[i] = *p
+			}
+		}
+		return validPages, nil
 	}
 
 	// 定义数据获取器 (用于目录验证等精确请求)
@@ -199,11 +206,12 @@ func (da *DirscanAddon) TriggerScan() (*ScanResult, error) {
 			recursiveFilter = CreateResponseFilterFromExternal()
 		}
 		
-		// [修复] 必须为递归过滤器注入 HTTP 客户端，否则递归过程中的指纹识别会缺少客户端
-		if recursiveFilter != nil {
-			processor := da.engine.getOrCreateRequestProcessor()
-			recursiveFilter.SetHTTPClient(processor)
-		}
+		// [取消] 二次指纹识别无需主动探测（icon和404）
+		// 仅保留被动页面识别，避免重复发包
+		// if recursiveFilter != nil {
+		// 	processor := da.engine.getOrCreateRequestProcessor()
+		// 	recursiveFilter.SetHTTPClient(processor)
+		// }
 	}
 
 	// 执行递归扫描
