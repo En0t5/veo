@@ -218,7 +218,7 @@ func (sc *ScanController) runActiveMode() error {
 	go func() {
 		select {
 		case <-sigChan:
-			logger.Info("收到中断信号，正在停止...")
+			logger.Info("正在停止...")
 			cancel()
 		case <-ctx.Done():
 			return

@@ -133,6 +133,7 @@ confluence:
   dsl:
     - "contains(body, 'id=\"com-atlassian-confluence')"
     - "contains(body, 'name=\"confluence-base-url\"')"
+    - "icon('/favicon.ico', 'bad2c1f96cd66e70b4aa119e7270cc62')"
 
 conftool:
   dsl:
@@ -352,6 +353,7 @@ fortinet-firewall:
   dsl:
     - "contains(body, 'fortitoken')"
     - "contains(body, 'str_table.mail_token_msg')"
+    - "icon('/favicon.ico', 'e462005902f81094ab3de44e4381de19')"
 
 fortinet-fortigate:
   dsl:
@@ -394,6 +396,7 @@ gitea:
 gitlab:
   dsl:
     - "icon('/favicon.ico', '85c754581e1d4b628be5b7712c042224')"
+    - "icon('/favicon.ico', 'f7e3d97f404e71d302b3239eef48d5f2')"
     - "contains(body, 'is_gitlab_team_member')"
     - "contains(header,'x-gitlab-meta')"
     - "contains(body, 'assets/gitlab_logo')"
@@ -577,8 +580,8 @@ jboss-eap:
 jeecgboot:
   dsl:
     - "contains(body,'.app-loading','.app-loading-title','.app-loading-wrap')"
+    - "contains(body, 'jeecg-boot','polyfill_','casPrefixUrl','load_title')"
     - "contains_all(body, 'absolute','9999999999999','#FFF','Open Sans','load_title')"
-    - "icon('/favicon.ico', '599637f95d6a1c0208bf41d8ff72f364')"
 
 jeecms:
   dsl:
@@ -604,6 +607,7 @@ jellyfin:
 jenkins:
   dsl:
     - "contains(body, 'Jenkins')"
+    - "icon('/favicon.ico', '23e8c7bd78e8cd826c5a6073b15068b1')"
 
 jetty:
   dsl:
@@ -883,6 +887,7 @@ vmware-esxi:
 vmware-horizon:
   dsl:
     - "contains(body, 'alt=\"vmware horizon\">')"
+    - "icon('/favicon.ico', 'c6acedaff906029fc5455d9ec52c7f42')"
 
 vmware-server-2:
   dsl:
@@ -926,6 +931,7 @@ yearning:
 yii-framework:
   dsl:
     - "contains(body, 'yii_csrf_token')"
+    - "icon('/favicon.ico', 'a976d227e5d1dcf62f5f7e623211dd1b')"
 
 ymhome-oa:
   dsl:
@@ -1118,10 +1124,6 @@ h3c-router:
   dsl:
     - "contains(body, '/wnm/ssl/web/frame/login.html')"
 
-bt-cn:
-  dsl:
-    - "contains(body, '宝塔Linux面板')"
-
 用友nc:
   tags: oa,yonyou,u8cloud
   dsl:
@@ -1313,6 +1315,7 @@ h3c-er2100:
 jira:
   dsl:
     - "contains(body, 'jira.webresources')"
+    - "icon('/favicon.ico', '88717398db158e3330ce94fc1784e4a7')"
 
 hadoop-applications:
   dsl:
@@ -1841,11 +1844,6 @@ interlib电子资源馆外访问系统:
     - "contains(body, 'SuperMap iServer')"
     - "contains(body, 'window.location.href=\"iserver\"')"
     - "contains(body, 'iserver/manager')"
-
-万户-ezoffice:
-  dsl:
-    - "contains(body, '/defaultroot')"
-    - "contains(body, 'fa-times-circle-o username_clear')"
 
 北京中科聚网信息技术有限公司一体化运营平台:
   dsl:
@@ -2598,6 +2596,7 @@ yzmcms:
 宝塔:
   dsl:
     - "contains(body, '入口校验失败','您没有将此域名或IP绑定到对应站点!','<title>恭喜，站点创建成功','面板系统后台','系统自动生成','您的请求在Web服务器中没有找到对应的站点','站点创建成功','宝塔Linux面板')"
+    - "icon('/favicon.ico', '9637ebd168435de51fea8193d2d89e39')"
 
 富通天下外贸erp:
   dsl:
@@ -3079,7 +3078,6 @@ h3c网管系统:
   dsl:
   - "contains_all(body, '权限问题或行为非法，您的访问被拒绝','Request')"
 
-
 ArcGIS:
   dsl:
   - "contains(body, 'arcgismanager','dojo/dojo/dojo.js')"
@@ -3100,6 +3098,7 @@ next.js:
 React Server:
   dsl:
   - "contains(body, 'React.createElement','react.production.min.js')"
+  - "icon('/favicon.ico', 'c92b85a5b907c70211f4ec25e29a8c4a')"
 
 疑似文件上传表单:
   dsl:
@@ -3142,7 +3141,16 @@ spring-gateway:
   dsl:
   - "contains(body, 'UI_component/ctrl/Button.js','UI_component/ctrl/PanelSuperclass.js')"
 
-git泄露:
+万户ezoffice:
   dsl:
-  - "contains_all(body, 'core','branch')"
-  - "contains(body, 'logallrefupdates','repositoryformatversion','refs/heads/master')"
+    - "contains(body, '/defaultroot','万户ezOFFICE协同管理平台','noliving_middle.gif')"
+    - "icon('/favicon.ico', 'fa1f01d0392d60663d8ce936fe06096a')"
+    - "contains(body, 'fa-times-circle-o username_clear')"
+
+信锐物联平台:
+  dsl:
+    - "icon('/favicon.ico', '42611fb3cd40040dc941f454014a105e')"
+
+OpenStack:
+  dsl:
+    - "icon('/favicon.ico', 'd9332f271f2f1c0df5dca81b7a0e3446')"
