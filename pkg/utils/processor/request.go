@@ -163,7 +163,7 @@ func (rp *RequestProcessor) ProcessURLsWithContext(ctx context.Context, urls []s
 	var responsesMu sync.Mutex
 
 	// 并发处理（worker pool）：支持 ctx 取消后停止派发
-	rp.processURLsConcurrent(ctx, urls, &responses, &responsesMu, stats, nil)
+	rp.processURLsConcurrent(ctx, urls, &responses, &responsesMu, stats, nil, nil)
 
 	// 完成处理
 	rp.finalizeProcessing(stats)
@@ -171,52 +171,8 @@ func (rp *RequestProcessor) ProcessURLsWithContext(ctx context.Context, urls []s
 	return responses
 }
 
-// ProcessURLsWithCallback 处理URL列表，并对每个响应执行回调
-func (rp *RequestProcessor) ProcessURLsWithCallback(urls []string, callback func(*interfaces.HTTPResponse)) []*interfaces.HTTPResponse {
-	return rp.ProcessURLsWithCallbackWithContext(context.Background(), urls, callback)
-}
-
-// ProcessURLsWithCallbackWithContext 处理URL列表（可取消），并对每个响应执行回调
-func (rp *RequestProcessor) ProcessURLsWithCallbackWithContext(ctx context.Context, urls []string, callback func(*interfaces.HTTPResponse)) []*interfaces.HTTPResponse {
-	if len(urls) == 0 {
-		return []*interfaces.HTTPResponse{}
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	// 初始化统计
-	stats := rp.initializeProcessingStats(len(urls), rp.config.MaxConcurrent, rp.config.RandomUserAgent)
-
-	// 更新统计显示器（总请求数）
-	if rp.statsUpdater != nil {
-		if rp.IsBatchMode() {
-			rp.statsUpdater.AddTotalRequests(int64(len(urls)))
-		} else {
-			rp.statsUpdater.SetTotalRequests(int64(len(urls)))
-		}
-	}
-
-	// 初始化响应收集
-	responses := make([]*interfaces.HTTPResponse, 0, len(urls))
-	var responsesMu sync.Mutex
-
-	// 并发处理（worker pool）：支持 ctx 取消后停止派发
-	rp.processURLsConcurrent(ctx, urls, &responses, &responsesMu, stats, callback)
-
-	// 完成处理
-	rp.finalizeProcessing(stats)
-
-	return responses
-}
-
-// ProcessURLsWithCallbackOnly 仅通过回调处理响应，不收集/返回结果
-func (rp *RequestProcessor) ProcessURLsWithCallbackOnly(urls []string, callback func(*interfaces.HTTPResponse)) {
-	rp.ProcessURLsWithCallbackOnlyWithContext(context.Background(), urls, callback)
-}
-
-// ProcessURLsWithCallbackOnlyWithContext 仅通过回调处理响应（可取消），不收集/返回结果
-func (rp *RequestProcessor) ProcessURLsWithCallbackOnlyWithContext(ctx context.Context, urls []string, callback func(*interfaces.HTTPResponse)) {
+// ProcessURLsWithCallbackOnlyWithContextAndProgress 仅通过回调处理响应（可取消），支持请求完成回调
+func (rp *RequestProcessor) ProcessURLsWithCallbackOnlyWithContextAndProgress(ctx context.Context, urls []string, callback func(*interfaces.HTTPResponse), onProcessed func()) {
 	if len(urls) == 0 {
 		return
 	}
@@ -234,12 +190,12 @@ func (rp *RequestProcessor) ProcessURLsWithCallbackOnlyWithContext(ctx context.C
 		}
 	}
 
-	rp.processURLsConcurrent(ctx, urls, nil, nil, stats, callback)
+	rp.processURLsConcurrent(ctx, urls, nil, nil, stats, callback, onProcessed)
 	rp.finalizeProcessing(stats)
 }
 
 // processURLsConcurrent 使用 worker pool 并发处理URL列表（支持 ctx 取消）
-func (rp *RequestProcessor) processURLsConcurrent(ctx context.Context, urls []string, responses *[]*interfaces.HTTPResponse, responsesMu *sync.Mutex, stats *ProcessingStats, callback func(*interfaces.HTTPResponse)) {
+func (rp *RequestProcessor) processURLsConcurrent(ctx context.Context, urls []string, responses *[]*interfaces.HTTPResponse, responsesMu *sync.Mutex, stats *ProcessingStats, callback func(*interfaces.HTTPResponse), onProcessed func()) {
 	maxConcurrent := rp.config.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
@@ -278,6 +234,9 @@ func (rp *RequestProcessor) processURLsConcurrent(ctx context.Context, urls []st
 
 					response, reqErr := rp.processURLWithContext(ctx, targetURL)
 					rp.updateProcessingStats(response, targetURL, reqErr, responses, responsesMu, stats)
+					if onProcessed != nil {
+						onProcessed()
+					}
 
 					if callback != nil && response != nil {
 						callback(response)
@@ -334,19 +293,56 @@ func (rp *RequestProcessor) processURLWithContext(ctx context.Context, url strin
 	return response, nil
 }
 
-// HTTP请求相关方法
+// RequestOnceWithHeaders 执行单次请求，支持自定义头部并更新统计
+func (rp *RequestProcessor) RequestOnceWithHeaders(ctx context.Context, rawURL string, headers map[string]string) (*interfaces.HTTPResponse, error) {
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
 
-// makeRequest 使用httpclient发起请求
-func (rp *RequestProcessor) makeRequest(rawURL string) (*interfaces.HTTPResponse, error) {
-	return rp.makeRequestWithHeaders(rawURL, nil)
+	if rp.statsUpdater != nil {
+		if rp.IsBatchMode() {
+			rp.statsUpdater.AddTotalRequests(1)
+		} else {
+			rp.statsUpdater.SetTotalRequests(1)
+		}
+	}
+
+	resp, err := rp.makeRequestWithHeadersRetry(ctx, rawURL, headers)
+
+	if rp.statsUpdater != nil {
+		rp.statsUpdater.IncrementCompletedRequests()
+		if err != nil {
+			rp.statsUpdater.IncrementErrors()
+			if rp.isTimeoutOrCanceledError(err) {
+				rp.statsUpdater.IncrementTimeouts()
+			}
+		}
+	}
+
+	return resp, err
 }
+
+// HTTP请求相关方法
 
 func (rp *RequestProcessor) makeRequestWithHeaders(rawURL string, extraHeaders map[string]string) (*interfaces.HTTPResponse, error) {
 	// 准备头部
 	headers := rp.getDefaultHeaders()
+	shouldRemoveCookie := rp.isDirscanModule()
 	for k, v := range extraHeaders {
+		if strings.EqualFold(k, "Cookie") && strings.TrimSpace(v) == "" {
+			shouldRemoveCookie = true
+			continue
+		}
 		headers[k] = v
 	}
+	if shouldRemoveCookie {
+		removeCookieHeader(headers)
+	}
+	removeConnectionHeader(headers)
 
 	startTime := time.Now()
 

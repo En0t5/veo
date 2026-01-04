@@ -193,6 +193,19 @@ func (rm *RuleManager) GetHeaderRules() []*FingerprintRule {
 	return headerRules
 }
 
+// GetHeaderRulesCount 获取 header 规则数量
+func (rm *RuleManager) GetHeaderRulesCount() int {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	count := 0
+	for _, rule := range rm.rules {
+		if rule != nil && rule.HasHeaders() {
+			count++
+		}
+	}
+	return count
+}
+
 // GetPathRulesCount 获取 path 规则数量
 func (rm *RuleManager) GetPathRulesCount() int {
 	rm.mu.RLock()

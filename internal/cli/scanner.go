@@ -63,7 +63,7 @@ type ScanController struct {
 func NewScanController(args *CLIArgs, cfg *config.Config) *ScanController {
 	threads := args.Threads
 	if threads <= 0 {
-		threads = 200
+		threads = 100
 	}
 	retry := 1
 	if args.RetrySet {

@@ -54,21 +54,31 @@ func (e *Engine) GetLoadedSummaryString() string {
 
 // AnalyzeResponseWithClient 分析响应包并进行指纹识别（增强版，支持icon()函数主动探测）
 func (e *Engine) AnalyzeResponseWithClient(response *HTTPResponse, httpClient httpclient.HTTPClientInterface) []*FingerprintMatch {
-	return e.analyzeResponseInternal(response, httpClient, false)
+	return e.analyzeResponseInternal(response, httpClient, false, true)
+}
+
+// AnalyzeResponsePassive 分析响应包并进行指纹识别（仅被动规则匹配）
+func (e *Engine) AnalyzeResponsePassive(response *HTTPResponse) []*FingerprintMatch {
+	return e.analyzeResponseInternal(response, nil, false, true)
+}
+
+// AnalyzeResponseWithClientNoNoMatch 分析响应包并进行指纹识别（不输出无匹配）
+func (e *Engine) AnalyzeResponseWithClientNoNoMatch(response *HTTPResponse, httpClient httpclient.HTTPClientInterface) []*FingerprintMatch {
+	return e.analyzeResponseInternal(response, httpClient, false, false)
 }
 
 // AnalyzeResponseWithClientSilent 分析响应包并进行指纹识别（静默版本，不自动输出结果）
 func (e *Engine) AnalyzeResponseWithClientSilent(response *HTTPResponse, httpClient interface{}) []*FingerprintMatch {
 	client, _ := httpClient.(httpclient.HTTPClientInterface)
-	return e.analyzeResponseInternal(response, client, true)
+	return e.analyzeResponseInternal(response, client, true, false)
 }
 
 // analyzeResponseInternal 内部核心分析逻辑
-func (e *Engine) analyzeResponseInternal(response *HTTPResponse, httpClient httpclient.HTTPClientInterface, silent bool) []*FingerprintMatch {
+func (e *Engine) analyzeResponseInternal(response *HTTPResponse, httpClient httpclient.HTTPClientInterface, silent bool, emitNoMatch bool) []*FingerprintMatch {
 	// 检查是否应该过滤此响应
 	if e.config.EnableFiltering && e.shouldFilterResponse(response) {
 		atomic.AddInt64(&e.stats.FilteredRequests, 1)
-		if !silent && e.config.OutputFormatter != nil {
+		if !silent && emitNoMatch && e.config.OutputFormatter != nil {
 			e.config.OutputFormatter.FormatNoMatch(response)
 		}
 		return nil
@@ -115,7 +125,7 @@ func (e *Engine) analyzeResponseInternal(response *HTTPResponse, httpClient http
 			logger.Debugf("静默模式匹配完成，匹配数量: %d，跳过自动输出", len(matches))
 		}
 	} else {
-		if !silent && e.config.OutputFormatter != nil {
+		if !silent && emitNoMatch && e.config.OutputFormatter != nil {
 			e.config.OutputFormatter.FormatNoMatch(response)
 		}
 	}
@@ -124,7 +134,7 @@ func (e *Engine) analyzeResponseInternal(response *HTTPResponse, httpClient http
 	if httpClient != nil {
 		if fetcher, ok := httpClient.(redirect.HTTPFetcher); ok {
 			if redirected, err := redirect.FollowClientRedirect(response, fetcher); err == nil && redirected != nil {
-				rMatches := e.analyzeResponseInternal(redirected, httpClient, true)
+				rMatches := e.analyzeResponseInternal(redirected, httpClient, true, emitNoMatch)
 
 				if len(rMatches) > 0 {
 					if !silent && e.config.OutputFormatter != nil {
@@ -206,6 +216,11 @@ func (e *Engine) HasPathRules() bool {
 // GetPathRulesCount 获取包含path字段的规则数量
 func (e *Engine) GetPathRulesCount() int {
 	return e.ruleManager.GetPathRulesCount()
+}
+
+// GetHeaderRulesCount 获取包含header字段的规则数量
+func (e *Engine) GetHeaderRulesCount() int {
+	return e.ruleManager.GetHeaderRulesCount()
 }
 
 // GetIconRules 获取所有包含icon()函数的规则

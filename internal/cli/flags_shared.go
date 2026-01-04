@@ -98,18 +98,11 @@ func validateWordlistFile(wordlistPath string) error {
 
 // validateOutputPath 验证输出路径
 func validateOutputPath(outputPath string) error {
-	// 统一输出为 <base>_realtime.csv，outputPath 仅作为前缀使用（允许任意后缀/无后缀）
 	outputPath = strings.TrimSpace(outputPath)
 	if outputPath == "" {
 		return fmt.Errorf("输出路径不能为空")
 	}
-
-	ext := filepath.Ext(outputPath)
-	base := strings.TrimSuffix(outputPath, ext)
-	realtimePath := base + "_realtime.csv"
-
-	// 获取目录路径
-	dir := filepath.Dir(realtimePath)
+	dir := filepath.Dir(outputPath)
 
 	// 如果目录不存在，尝试创建
 	if _, err := os.Stat(dir); os.IsNotExist(err) {

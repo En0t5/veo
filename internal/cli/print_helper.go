@@ -8,6 +8,8 @@ import (
 	"veo/pkg/utils/logger"
 )
 
+const urlDisplayLimit = 60
+
 // printHTTPResponseResult 打印单个有效HTTP响应（主动+被动通用）
 func printHTTPResponseResult(page *interfaces.HTTPResponse, showSnippet bool, showRule bool) {
 	if page == nil {
@@ -28,8 +30,10 @@ func printHTTPResponseResult(page *interfaces.HTTPResponse, showSnippet bool, sh
 		fingerprintParts = append(fingerprintParts, fingerprintUnion)
 	}
 
-	line := formatter.FormatLogLine(
-		page.URL,
+	displayURL, detailURL := formatter.SplitURLForLog(page.URL, urlDisplayLimit)
+	line := formatter.FormatLogLineWithURLSuffix(
+		displayURL,
+		detailURL,
 		page.StatusCode,
 		page.Title,
 		page.ContentLength,
@@ -40,13 +44,6 @@ func printHTTPResponseResult(page *interfaces.HTTPResponse, showSnippet bool, sh
 
 	var messageBuilder strings.Builder
 	messageBuilder.WriteString(line)
-
-	// 如果 URL 过长（超过 60 字符），在下一行输出完整 URL 方便复制
-	if len(page.URL) > 60 {
-		messageBuilder.WriteString("\n")
-		messageBuilder.WriteString("  └─ ")
-		messageBuilder.WriteString(formatter.FormatFullURL(page.URL))
-	}
 
 	if showSnippet && len(matches) > 0 {
 		var snippetLines []string

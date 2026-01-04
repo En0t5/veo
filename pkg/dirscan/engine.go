@@ -10,6 +10,7 @@ import (
 	"veo/pkg/utils/interfaces"
 	"veo/pkg/utils/logger"
 	requests "veo/pkg/utils/processor"
+	"veo/pkg/utils/progress"
 )
 
 // 引擎实现
@@ -88,15 +89,25 @@ func (e *Engine) PerformScanWithFilter(ctx context.Context, collectorInstance in
 	var firstResponseURL string
 
 	// 3. 执行HTTP请求（带实时过滤回调）
-	actualConcurrency := e.getActualConcurrency()
 	scanLabel := buildScanLabel(collectorInstance)
-	if scanLabel != "" {
-		logger.Infof("Scanning For %s, %d URL，Threads: %d，Random UA: true", scanLabel, len(scanURLs), actualConcurrency)
-	} else {
-		logger.Infof("%d URL，Threads: %d，Random UA: true", len(scanURLs), actualConcurrency)
+	totalRequests := int64(len(scanURLs))
+	var progressTracker *progress.RequestProgress
+	if scanLabel != "" && totalRequests > 0 {
+		showProgress := true
+		if processor := e.getOrCreateRequestProcessor(); processor != nil {
+			if updater := processor.GetStatsUpdater(); updater != nil {
+				if enabled, ok := updater.(interface{ IsEnabled() bool }); ok && enabled.IsEnabled() {
+					showProgress = false
+				}
+			}
+		}
+		if showProgress {
+			progressTracker = progress.NewRequestProgress(scanLabel, totalRequests, true)
+			defer progressTracker.Stop()
+		}
 	}
 
-	totalResponses, err := e.performHTTPRequestsWithCallback(ctx, scanURLs, func(resp *interfaces.HTTPResponse) {
+	totalResponses, err := e.performHTTPRequestsWithCallback(ctx, scanURLs, progressTracker, func(resp *interfaces.HTTPResponse) {
 		if resp == nil {
 			return
 		}
@@ -203,7 +214,7 @@ func (e *Engine) generateScanURLs(collectorInstance interfaces.URLCollectorInter
 }
 
 // performHTTPRequestsWithCallback 执行HTTP请求（支持回调）
-func (e *Engine) performHTTPRequestsWithCallback(ctx context.Context, scanURLs []string, callback func(*interfaces.HTTPResponse)) (int64, error) {
+func (e *Engine) performHTTPRequestsWithCallback(ctx context.Context, scanURLs []string, progress *progress.RequestProgress, callback func(*interfaces.HTTPResponse)) (int64, error) {
 	logger.Debug("开始执行HTTP扫描 (Callback模式)")
 
 	// 获取或创建请求处理器
@@ -211,14 +222,19 @@ func (e *Engine) performHTTPRequestsWithCallback(ctx context.Context, scanURLs [
 
 	// 执行请求
 	var totalResponses int64
-	processor.ProcessURLsWithCallbackOnlyWithContext(ctx, scanURLs, func(resp *interfaces.HTTPResponse) {
+	var onProcessed func()
+	if progress != nil {
+		onProcessed = progress.Increment
+	}
+
+	processor.ProcessURLsWithCallbackOnlyWithContextAndProgress(ctx, scanURLs, func(resp *interfaces.HTTPResponse) {
 		if resp != nil {
 			atomic.AddInt64(&totalResponses, 1)
 		}
 		if callback != nil {
 			callback(resp)
 		}
-	})
+	}, onProcessed)
 
 	atomic.StoreInt64(&e.stats.SuccessRequests, totalResponses)
 

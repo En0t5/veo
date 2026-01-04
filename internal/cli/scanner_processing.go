@@ -40,11 +40,29 @@ func (sc *ScanController) convertToFingerprintResponse(resp *interfaces.HTTPResp
 		headers = make(map[string][]string)
 	}
 
-	// 关键修复：处理响应体解压缩和编码转换
-	processedBody := sc.processResponseBody(resp)
+	// 处理响应体解压缩和编码转换
+	processedBody := ""
+	if resp.ResponseBody != "" {
+		if resp.BodyDecoded {
+			processedBody = resp.ResponseBody
+		} else {
+			rawBody := resp.ResponseBody
 
-	// 提取处理后的标题（使用解压缩和编码转换后的内容）
-	title := sc.extractTitleFromHTML(processedBody)
+			// Content-Encoding 解压
+			var contentEncoding string
+			if headers != nil {
+				if encodingHeaders, exists := headers["Content-Encoding"]; exists && len(encodingHeaders) > 0 {
+					contentEncoding = encodingHeaders[0]
+				}
+			}
+
+			decompressed := sharedutils.DecompressByEncoding([]byte(rawBody), contentEncoding)
+			processedBody = fingerprint.GetEncodingDetector().DetectAndConvert(string(decompressed), resp.ContentType)
+		}
+	}
+
+	// 提取处理后的标题
+	title := sharedutils.ExtractTitle(processedBody)
 
 	logger.Debugf("响应体处理完成: %s (原始: %d bytes, 处理后: %d bytes)",
 		resp.URL, len(resp.ResponseBody), len(processedBody))
@@ -60,50 +78,6 @@ func (sc *ScanController) convertToFingerprintResponse(resp *interfaces.HTTPResp
 		Server:          resp.Server,
 		Title:           title, // 使用处理后的标题
 	}
-}
-
-func (sc *ScanController) processResponseBody(resp *interfaces.HTTPResponse) string {
-	if resp == nil || resp.ResponseBody == "" {
-		return ""
-	}
-
-	if resp.BodyDecoded {
-		return resp.ResponseBody
-	}
-
-	rawBody := resp.ResponseBody
-
-	// 步骤1: 检查Content-Encoding并解压缩
-	decompressedBody := sc.decompressResponseBody(rawBody, resp.ResponseHeaders)
-
-	// 步骤2: 字符编码检测和转换
-	convertedBody := fingerprint.GetEncodingDetector().DetectAndConvert(decompressedBody, resp.ContentType)
-
-	logger.Debugf("响应体处理: %s (原始: %d -> 解压: %d -> 转换: %d bytes)",
-		resp.URL, len(rawBody), len(decompressedBody), len(convertedBody))
-
-	return convertedBody
-}
-
-func (sc *ScanController) decompressResponseBody(body string, headers map[string][]string) string {
-	if body == "" {
-		return ""
-	}
-
-	// 获取Content-Encoding头部
-	var contentEncoding string
-	if headers != nil {
-		if encodingHeaders, exists := headers["Content-Encoding"]; exists && len(encodingHeaders) > 0 {
-			contentEncoding = encodingHeaders[0]
-		}
-	}
-
-	decompressed := sharedutils.DecompressByEncoding([]byte(body), contentEncoding)
-	return string(decompressed)
-}
-
-func (sc *ScanController) extractTitleFromHTML(body string) string {
-	return sharedutils.ExtractTitle(body)
 }
 
 // extractBaseURL 从完整URL中提取基础URL（协议+主机）

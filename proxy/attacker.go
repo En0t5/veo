@@ -406,7 +406,6 @@ func (a *attacker) attack(res http.ResponseWriter, req *http.Request) {
 			}
 		}
 		if response.close {
-			res.Header().Add("Connection", "close")
 		}
 		res.WriteHeader(response.StatusCode)
 

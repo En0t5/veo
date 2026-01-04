@@ -22,13 +22,11 @@ func (rp *RequestProcessor) getDefaultHeaders() map[string]string {
 	}
 	// 获取基础头部
 	headers := map[string]string{
-		"User-Agent":                rp.getRandomUserAgent(), // 使用随机UserAgent
-		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-		"Accept-Language":           "zh-CN,zh;q=0.9,en;q=0.8",
-		"Accept-Encoding":           acceptEncoding,
-		"Connection":                "keep-alive",
-		"Upgrade-Insecure-Requests": "1",
-		"Cookie":                    "rememberMe=1",
+		"User-Agent":      rp.getRandomUserAgent(), // 使用随机UserAgent
+		"Accept-Encoding": acceptEncoding,
+	}
+	if !rp.isDirscanModule() {
+		headers["Cookie"] = "rememberMe=1"
 	}
 
 	// 合并认证头部
@@ -49,6 +47,27 @@ func (rp *RequestProcessor) getAuthHeaders() map[string]string {
 		authHeaders[key] = value
 	}
 	return authHeaders
+}
+
+func removeConnectionHeader(headers map[string]string) {
+	for key := range headers {
+		if strings.EqualFold(key, "Connection") {
+			delete(headers, key)
+		}
+	}
+}
+
+func removeCookieHeader(headers map[string]string) {
+	for key := range headers {
+		if strings.EqualFold(key, "Cookie") {
+			delete(headers, key)
+		}
+	}
+}
+
+func (rp *RequestProcessor) isDirscanModule() bool {
+	context := strings.ToLower(strings.TrimSpace(rp.GetModuleContext()))
+	return strings.HasPrefix(context, "dirscan")
 }
 
 // ============================================================================

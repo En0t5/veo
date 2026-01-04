@@ -6,12 +6,13 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"veo/pkg/fingerprint"
+	"veo/pkg/utils/httpclient"
 	"veo/pkg/utils/interfaces"
 	"veo/pkg/utils/logger"
 	requests "veo/pkg/utils/processor"
+	"veo/pkg/utils/progress"
 )
 
 func (sc *ScanController) runFingerprintModuleWithContext(ctx context.Context, targets []string) ([]interfaces.HTTPResponse, error) {
@@ -85,6 +86,38 @@ func (sc *ScanController) runConcurrentFingerprintWithContext(parentCtx context.
 	}
 	logger.Debugf("指纹识别目标并发数设置为: %d", maxConcurrent)
 
+	var progressTracker *progress.RequestProgress
+	totalRequests := int64(len(targets) * 2)
+	if sc.fingerprintEngine != nil && sc.args != nil && !sc.args.NoProbe {
+		activeTargets := len(sc.getUniqueProbeTargets(targets))
+		if activeTargets > 0 {
+			activeRequests := activeTargets
+			if sc.fingerprintEngine.HasPathRules() {
+				pathCount := sc.fingerprintEngine.GetPathRulesCount()
+				headerCount := sc.fingerprintEngine.GetHeaderRulesCount()
+				activeRequests = activeTargets * (pathCount + headerCount + 1)
+			}
+			totalRequests += int64(activeRequests)
+		}
+	}
+	if totalRequests > 0 {
+		showProgress := true
+		if sc.args != nil && sc.args.JSONOutput {
+			showProgress = false
+		}
+		if updater := sc.requestProcessor.GetStatsUpdater(); updater != nil {
+			if enabled, ok := updater.(interface{ IsEnabled() bool }); ok && enabled.IsEnabled() {
+				showProgress = false
+			}
+		}
+		if showProgress {
+			label := sc.buildFingerprintProgressLabel(targets)
+			if label != "" {
+				progressTracker = progress.NewRequestProgress(label, totalRequests, true)
+			}
+		}
+	}
+
 	jobs := make(chan string, len(targets))
 	resultsChan := make(chan []interfaces.HTTPResponse, len(targets))
 
@@ -102,7 +135,7 @@ func (sc *ScanController) runConcurrentFingerprintWithContext(parentCtx context.
 
 				taskTimeout := sc.requestProcessor.GetConfig().Timeout
 				targetCtx, targetCancel := context.WithTimeout(ctx, taskTimeout)
-				results := sc.processSingleTargetFingerprintWithContext(targetCtx, targetURL)
+				results := sc.processSingleTargetFingerprintWithContext(targetCtx, targetURL, progressTracker)
 				targetCancel()
 
 				resultsChan <- results
@@ -142,16 +175,20 @@ func (sc *ScanController) runConcurrentFingerprintWithContext(parentCtx context.
 	<-done
 
 	// 主动探测 (Path, Icon, 404)
-	activeResults := sc.performActiveProbing(ctx, targets)
+	activeResults := sc.performActiveProbing(ctx, targets, progressTracker)
 	if len(activeResults) > 0 {
 		allResults = append(allResults, activeResults...)
+	}
+
+	if progressTracker != nil {
+		progressTracker.Stop()
 	}
 
 	return allResults, nil
 }
 
 // processSingleTargetFingerprintWithContext 处理单个目标，支持传入 Context
-func (sc *ScanController) processSingleTargetFingerprintWithContext(ctx context.Context, target string) []interfaces.HTTPResponse {
+func (sc *ScanController) processSingleTargetFingerprintWithContext(ctx context.Context, target string, progressTracker *progress.RequestProgress) []interfaces.HTTPResponse {
 	// 使用channel接收结果以支持select超时
 	resultChan := make(chan []interfaces.HTTPResponse, 1)
 
@@ -163,7 +200,7 @@ func (sc *ScanController) processSingleTargetFingerprintWithContext(ctx context.
 			}
 		}()
 
-		resultChan <- sc.processSingleTargetFingerprint(ctx, target)
+		resultChan <- sc.processSingleTargetFingerprint(ctx, target, progressTracker)
 	}()
 
 	select {
@@ -176,7 +213,7 @@ func (sc *ScanController) processSingleTargetFingerprintWithContext(ctx context.
 }
 
 // processSingleTargetFingerprint 处理单个目标的指纹识别（多目标并发优化）
-func (sc *ScanController) processSingleTargetFingerprint(ctx context.Context, target string) []interfaces.HTTPResponse {
+func (sc *ScanController) processSingleTargetFingerprint(ctx context.Context, target string, progressTracker *progress.RequestProgress) []interfaces.HTTPResponse {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -189,42 +226,148 @@ func (sc *ScanController) processSingleTargetFingerprint(ctx context.Context, ta
 	defer sc.requestProcessor.SetModuleContext(originalContext)
 
 	var results []interfaces.HTTPResponse
+	basePrinted := false
 
-	responses := sc.requestProcessor.ProcessURLsWithContext(ctx, []string{target})
+	if sc.requestProcessor == nil || sc.fingerprintEngine == nil {
+		return results
+	}
 
-	for _, resp := range responses {
-		fpResponse := sc.convertToFingerprintResponse(resp)
+	// 1) 首次请求：不携带 Cookie，进行被动匹配并输出基础信息
+	respWithoutCookie, err := sc.requestProcessor.RequestOnceWithHeaders(ctx, target, map[string]string{"Cookie": ""})
+	if progressTracker != nil {
+		progressTracker.Increment()
+	}
+	if err == nil && respWithoutCookie != nil {
+		fpResponse := sc.convertToFingerprintResponse(respWithoutCookie)
 		if fpResponse == nil {
-			logger.Debugf("响应转换失败: %s", resp.URL)
-			continue
+			logger.Debugf("响应转换失败: %s", respWithoutCookie.URL)
+		} else {
+			matches := sc.fingerprintEngine.AnalyzeResponsePassive(fpResponse)
+			basePrinted = true
+			httpResp := interfaces.HTTPResponse{
+				URL:             respWithoutCookie.URL,
+				StatusCode:      respWithoutCookie.StatusCode,
+				ContentLength:   respWithoutCookie.ContentLength,
+				ContentType:     respWithoutCookie.ContentType,
+				ResponseHeaders: respWithoutCookie.ResponseHeaders,
+				RequestHeaders:  respWithoutCookie.RequestHeaders,
+				ResponseBody:    respWithoutCookie.ResponseBody,
+				Title:           respWithoutCookie.Title,
+				Server:          respWithoutCookie.Server,
+				Duration:        respWithoutCookie.Duration,
+				IsDirectory:     false,
+			}
+			if converted := convertFingerprintMatches(matches, true); len(converted) > 0 {
+				httpResp.Fingerprints = converted
+			}
+			results = append(results, httpResp)
+			logger.Debugf("%s 识别完成: %d", target, len(matches))
+		}
+	}
+
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return results
+		default:
+		}
+	}
+
+	// 2) 追加请求：携带 Cookie，仅输出匹配结果（无匹配则跳过）
+	respWithCookie, err := sc.requestProcessor.RequestOnceWithHeaders(ctx, target, nil)
+	if progressTracker != nil {
+		progressTracker.Increment()
+	}
+	if err == nil && respWithCookie != nil {
+		fpResponse := sc.convertToFingerprintResponse(respWithCookie)
+		if fpResponse == nil {
+			logger.Debugf("响应转换失败: %s", respWithCookie.URL)
+			return results
 		}
 
-		// Pass client to support icon() probing
-		// Note: This does NOT trigger path enumeration, only DSL functions like icon()
-		matches := sc.fingerprintEngine.AnalyzeResponseWithClient(fpResponse, sc.requestProcessor)
-
-		httpResp := interfaces.HTTPResponse{
-			URL:             resp.URL,
-			StatusCode:      resp.StatusCode,
-			ContentLength:   resp.ContentLength,
-			ContentType:     resp.ContentType,
-			ResponseHeaders: resp.ResponseHeaders,
-			RequestHeaders:  resp.RequestHeaders,
-			ResponseBody:    resp.ResponseBody,
-			Title:           resp.Title,
-			Server:          resp.Server,
-			Duration:        resp.Duration,
-			IsDirectory:     false,
+		appendBase := !basePrinted
+		var matches []*fingerprint.FingerprintMatch
+		if basePrinted {
+			matches = sc.fingerprintEngine.AnalyzeResponseWithClientNoNoMatch(fpResponse, sc.requestProcessor)
+		} else {
+			matches = sc.fingerprintEngine.AnalyzeResponseWithClient(fpResponse, sc.requestProcessor)
+			basePrinted = true
 		}
-		if converted := convertFingerprintMatches(matches, true); len(converted) > 0 {
-			httpResp.Fingerprints = converted
+		if len(matches) > 0 || appendBase {
+			httpResp := interfaces.HTTPResponse{
+				URL:             respWithCookie.URL,
+				StatusCode:      respWithCookie.StatusCode,
+				ContentLength:   respWithCookie.ContentLength,
+				ContentType:     respWithCookie.ContentType,
+				ResponseHeaders: respWithCookie.ResponseHeaders,
+				RequestHeaders:  respWithCookie.RequestHeaders,
+				ResponseBody:    respWithCookie.ResponseBody,
+				Title:           respWithCookie.Title,
+				Server:          respWithCookie.Server,
+				Duration:        respWithCookie.Duration,
+				IsDirectory:     false,
+			}
+			if len(matches) > 0 {
+				httpResp.Fingerprints = convertFingerprintMatches(matches, true)
+			}
+			results = append(results, httpResp)
 		}
-		results = append(results, httpResp)
-
 		logger.Debugf("%s 识别完成: %d", target, len(matches))
 	}
 
 	return results
+}
+
+func (sc *ScanController) buildFingerprintProgressLabel(targets []string) string {
+	if len(targets) == 1 {
+		return sc.extractBaseURL(targets[0])
+	}
+	return "Fingerprint"
+}
+
+type progressHTTPClient struct {
+	base      httpclient.HTTPClientInterface
+	header    httpclient.HeaderAwareClient
+	onRequest func()
+}
+
+func (c *progressHTTPClient) MakeRequest(rawURL string) (string, int, error) {
+	body, statusCode, err := c.base.MakeRequest(rawURL)
+	if c.onRequest != nil {
+		c.onRequest()
+	}
+	return body, statusCode, err
+}
+
+func (c *progressHTTPClient) MakeRequestWithHeaders(rawURL string, headers map[string]string) (string, int, error) {
+	if c.header != nil {
+		body, statusCode, err := c.header.MakeRequestWithHeaders(rawURL, headers)
+		if c.onRequest != nil {
+			c.onRequest()
+		}
+		return body, statusCode, err
+	}
+
+	body, statusCode, err := c.base.MakeRequest(rawURL)
+	if c.onRequest != nil {
+		c.onRequest()
+	}
+	return body, statusCode, err
+}
+
+func (sc *ScanController) wrapProgressHTTPClient(base httpclient.HTTPClientInterface, progressTracker *progress.RequestProgress) httpclient.HTTPClientInterface {
+	if base == nil || progressTracker == nil {
+		return base
+	}
+
+	client := &progressHTTPClient{
+		base:      base,
+		onRequest: progressTracker.Increment,
+	}
+	if header, ok := base.(httpclient.HeaderAwareClient); ok {
+		client.header = header
+	}
+	return client
 }
 
 // printFingerprintResultWithProgressClear 输出指纹结果并清除进度条（Helper function for DRY）
@@ -240,7 +383,7 @@ func (sc *ScanController) printFingerprintResultWithProgressClear(matches []*fin
 }
 
 // performActiveProbing 执行主动探测（Path, Icon, 404）
-func (sc *ScanController) performActiveProbing(ctx context.Context, targets []string) []interfaces.HTTPResponse {
+func (sc *ScanController) performActiveProbing(ctx context.Context, targets []string, progressTracker *progress.RequestProgress) []interfaces.HTTPResponse {
 	// 检查指纹引擎是否可用
 	if sc.fingerprintEngine == nil {
 		logger.Debug("指纹引擎未初始化，跳过主动探测")
@@ -262,20 +405,6 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 
 	// 检查是否有任何需要主动探测的规则
 	hasPathRules := sc.fingerprintEngine.HasPathRules()
-	iconRules := sc.fingerprintEngine.GetIconRules() // 需要先在engine暴露，或者直接访问RuleManager
-	// 注意：GetIconRules是在RuleManager中，Engine还未暴露。
-	// 这里我们需要在Engine中增加GetIconRules或者简单判断。
-	// 暂时假设我们总是有可能需要探测Icon（因为Icon规则很常见），或者我们修改Engine暴露此方法。
-	// 但为了保持KISS，如果uniqueTargets为空，我们也不做任何事。
-
-	if !hasPathRules && len(iconRules) == 0 {
-		logger.Debug("没有Path规则且没有Icon规则，跳过主动探测")
-		// 仍然可能需要404探测，但通常404探测是伴随的。
-		// 如果完全没有主动规则，是否还要做404？
-		// 404探测是全量匹配，理论上总是可以做。但为了性能，我们通常只在有指纹匹配需求时做。
-		// 保持现状：如果完全没有任何规则（包括被动），我们根本不会进到这里。
-		// 让我们继续，只是记录日志。
-	}
 
 	var allResults []interfaces.HTTPResponse
 
@@ -294,14 +423,12 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 	outerConcurrent := maxConcurrent
 
 	formatter := sc.fingerprintEngine.GetOutputFormatter()
+	probeClient := sc.wrapProgressHTTPClient(sc.requestProcessor, progressTracker)
 
 	jobs := make(chan string, len(uniqueTargets))
 	resultsChan := make(chan []interfaces.HTTPResponse, len(uniqueTargets))
 
 	var wg sync.WaitGroup
-
-	var processedCount int32
-	totalCount := int32(len(uniqueTargets))
 
 	for i := 0; i < outerConcurrent; i++ {
 		wg.Add(1)
@@ -326,7 +453,7 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 
 					// 1. Path Probing
 					if hasPathRules {
-						results, err := sc.fingerprintEngine.ExecuteActiveProbing(probeCtx, baseURL, sc.requestProcessor)
+						results, err := sc.fingerprintEngine.ExecuteActiveProbing(probeCtx, baseURL, probeClient)
 						if err != nil {
 							logger.Debugf("Path probing error: %v", err)
 						}
@@ -343,12 +470,7 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 						}
 					}
 
-					// 2. Icon Probing (New)
-					// Icon指纹识别已经在 processSingleTargetFingerprint (Phase 1) 中通过 AnalyzeResponseWithClient 隐式完成了
-					// AnalyzeResponseWithClient 会处理所有规则，包括 icon() 规则，并自动进行 HTTP 请求去重
-					// 因此这里不需要再次调用 ExecuteIconProbing，否则会导致重复的指纹结果输出
-					// 如果需要单独对非主目标进行 Icon 探测，可以使用 ExecuteIconProbing，但目前 uniqueTargets 主要是主目标
-					// 所以这里留空或注释掉，以避免冗余。
+					// Icon 探测已由被动阶段完成，这里不重复发起
 					/*
 						iconResults, err := sc.fingerprintEngine.ExecuteIconProbing(probeCtx, baseURL, sc.httpClient)
 						if err != nil {
@@ -364,7 +486,7 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 					*/
 
 					// 3. 404 Page Probing
-					if res404 := sc.perform404PageProbing(probeCtx, baseURL, formatter); res404 != nil {
+					if res404 := sc.perform404PageProbing(probeCtx, baseURL, formatter, probeClient); res404 != nil {
 						localResults = append(localResults, *res404)
 					}
 
@@ -373,12 +495,6 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 					logger.Debugf("目标已探测过，跳过主动探测: %s", probeKey)
 				}
 				resultsChan <- localResults
-
-				// 更新进度
-				curr := atomic.AddInt32(&processedCount, 1)
-				if !sc.args.JSONOutput && sc.args.Stats && curr%2 == 0 {
-					fmt.Printf("\rActive Probing: %d/%d (%.1f%%)", curr, totalCount, float64(curr)/float64(totalCount)*100)
-				}
 			}
 		}()
 	}
@@ -401,9 +517,6 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 	}()
 
 	wg.Wait()
-	if !sc.args.JSONOutput && sc.args.Stats {
-		fmt.Println() // Newline after progress
-	}
 	close(resultsChan)
 	<-resDone
 
@@ -411,7 +524,7 @@ func (sc *ScanController) performActiveProbing(ctx context.Context, targets []st
 }
 
 // perform404PageProbing 执行404页面指纹识别
-func (sc *ScanController) perform404PageProbing(ctx context.Context, baseURL string, formatter fingerprint.OutputFormatter) *interfaces.HTTPResponse {
+func (sc *ScanController) perform404PageProbing(ctx context.Context, baseURL string, formatter fingerprint.OutputFormatter, client httpclient.HTTPClientInterface) *interfaces.HTTPResponse {
 	if sc.fingerprintEngine == nil {
 		return nil
 	}
@@ -422,7 +535,10 @@ func (sc *ScanController) perform404PageProbing(ctx context.Context, baseURL str
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	result, err := sc.fingerprintEngine.Execute404Probing(probeCtx, baseURL, sc.requestProcessor)
+	if client == nil {
+		client = sc.requestProcessor
+	}
+	result, err := sc.fingerprintEngine.Execute404Probing(probeCtx, baseURL, client)
 	if err != nil {
 		logger.Debugf("404 probing error: %v", err)
 		return nil

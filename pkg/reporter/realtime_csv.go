@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/csv"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,16 +26,11 @@ func NewRealtimeCSVReporter(outputPath string) (*RealtimeCSVReporter, error) {
 	if outputPath == "" {
 		return nil, fmt.Errorf("输出路径为空")
 	}
-
-	ext := filepath.Ext(outputPath)
-	base := strings.TrimSuffix(outputPath, ext)
-	realtimePath := base + "_realtime.csv"
-
-	if err := os.MkdirAll(filepath.Dir(realtimePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return nil, fmt.Errorf("创建输出目录失败: %w", err)
 	}
 
-	f, err := os.OpenFile(realtimePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("打开输出文件失败: %w", err)
 	}
@@ -42,11 +38,11 @@ func NewRealtimeCSVReporter(outputPath string) (*RealtimeCSVReporter, error) {
 	r := &RealtimeCSVReporter{
 		file:   f,
 		writer: csv.NewWriter(f),
-		path:   realtimePath,
+		path:   outputPath,
 	}
 
 	if stat, err := f.Stat(); err == nil && stat.Size() == 0 {
-		if err := r.writer.Write([]string{"URL", "StatusCode", "Title", "Fingerprint"}); err != nil {
+		if err := r.writer.Write([]string{"URL", "Host", "StatusCode", "Title", "Content-Length", "Fingerprint"}); err != nil {
 			_ = f.Close()
 			return nil, fmt.Errorf("写入CSV表头失败: %w", err)
 		}
@@ -86,10 +82,21 @@ func (r *RealtimeCSVReporter) WriteResponse(resp *interfaces.HTTPResponse) error
 		return fmt.Errorf("realtime csv reporter 已关闭")
 	}
 
+	length := resp.ContentLength
+	if length < 0 {
+		length = 0
+	}
+	host := ""
+	if parsed, err := url.Parse(resp.URL); err == nil {
+		host = parsed.Host
+	}
+
 	if err := r.writer.Write([]string{
 		resp.URL,
+		host,
 		strconv.Itoa(resp.StatusCode),
 		resp.Title,
+		strconv.FormatInt(length, 10),
 		strings.Join(fingerprints, "|"),
 	}); err != nil {
 		return err

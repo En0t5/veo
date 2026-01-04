@@ -50,7 +50,7 @@ func getDefaultConfig() *RequestConfig {
 
 	retries := 3 // 默认重试次数
 
-	maxConcurrent := 50 // 默认并发数
+	maxConcurrent := 100 // 默认并发数
 
 	connectTimeout := 5 * time.Second // 默认连接超时时间
 	maxRedirects := DefaultMaxRedirects

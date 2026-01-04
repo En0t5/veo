@@ -105,9 +105,10 @@ func (f *ConsoleOutputFormatter) FormatMatch(matches []*FingerprintMatch, respon
 	// 构建指纹显示列表
 	fingerprintDisplays := f.buildFingerprintDisplays(uniqueMatches)
 
-	// 格式化日志行
-	line := formatter.FormatLogLine(
-		response.URL,
+	displayURL, detailURL := formatter.SplitURLForLog(response.URL, 60)
+	line := formatter.FormatLogLineWithURLSuffix(
+		displayURL,
+		detailURL,
 		response.StatusCode,
 		response.Title,
 		response.ContentLength,
@@ -116,11 +117,6 @@ func (f *ConsoleOutputFormatter) FormatMatch(matches []*FingerprintMatch, respon
 		true,
 		tags...,
 	)
-
-	// 如果URL过长,在下一行输出完整URL方便复制
-	if len(response.URL) > 60 {
-		line += "\n  └─ " + formatter.FormatFullURL(response.URL)
-	}
 
 	logger.Info(line)
 
@@ -145,8 +141,10 @@ func (f *ConsoleOutputFormatter) FormatNoMatch(response *HTTPResponse) {
 		f.onOutput(response, nil, nil)
 	}
 
-	line := formatter.FormatLogLine(
-		response.URL,
+	displayURL, detailURL := formatter.SplitURLForLog(response.URL, 60)
+	line := formatter.FormatLogLineWithURLSuffix(
+		displayURL,
+		detailURL,
 		response.StatusCode,
 		response.Title,
 		response.ContentLength,
@@ -154,11 +152,6 @@ func (f *ConsoleOutputFormatter) FormatNoMatch(response *HTTPResponse) {
 		nil,
 		false,
 	)
-
-	// 如果URL过长,在下一行输出完整URL方便复制
-	if len(response.URL) > 60 {
-		line += "\n  └─ " + response.URL
-	}
 
 	logger.Info(line)
 }

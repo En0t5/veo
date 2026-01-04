@@ -70,8 +70,8 @@ func ParseCLIArgs() *CLIArgs {
 		proxy      = flag.String("proxy", "", "设置上游代理 (例如: http://127.0.0.1:8080 或 socks5://127.0.0.1:1080)")
 		debug      = flag.Bool("debug", false, "启用调试模式，显示详细日志 (默认: 仅显示INFO及以上级别)")
 
-		threads     = flag.Int("t", 0, "统一线程并发数量，对所有模块生效 (默认: 200)")
-		threadsLong = flag.Int("threads", 0, "统一线程并发数量，对所有模块生效 (默认: 200)")
+		threads     = flag.Int("t", 0, "统一线程并发数量，对所有模块生效 (默认: 100)")
+		threadsLong = flag.Int("threads", 0, "统一线程并发数量，对所有模块生效 (默认: 100)")
 		retry       = flag.Int("retry", 0, "扫描失败目标的重试次数 (默认: 1)")
 		timeout     = flag.Int("timeout", 0, "全局连接超时时间(秒)，对所有模块生效 (默认: 3)")
 
@@ -219,7 +219,7 @@ veo - 指纹识别/目录扫描
   -ua bool           是否启用随机User-Agent 池 (默认 true，使用 -ua=false 关闭)
 
 性能调优:
-  -t, --threads int  全局并发线程数（默认 200）
+  -t, --threads int  全局并发线程数（默认 100）
   --retry int        失败重试次数（默认 1）
   --timeout int      全局超时时间（秒，默认 3）
 
@@ -229,7 +229,7 @@ veo - 指纹识别/目录扫描
   --no-filter        完全禁用目录扫描哈希过滤（默认开启）
 
 输出与过滤:
-  -o, --output string  写入实时CSV报告（输出为 <path>_realtime.csv）
+  -o, --output string  写入实时CSV报告（输出为 <path>）
   --header string      自定义 HTTP 头部，可重复指定
   -s string            保留的 HTTP 状态码列表
   --update-rules       从云端更新指纹识别规则库
@@ -371,7 +371,7 @@ func applyArgsToConfig(args *CLIArgs) {
 			requestConfig.Threads = args.Threads
 			logger.Debugf("全局配置：线程并发数量设置为 %d", requestConfig.Threads)
 		} else if requestConfig.Threads <= 0 {
-			requestConfig.Threads = 200
+			requestConfig.Threads = 100
 		}
 
 		if args.RetrySet {
